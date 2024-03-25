@@ -20,6 +20,7 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_drm.h>
+#include <libavutil/imgutils.h>
 
 // protocol headers that we build as part of the compile
 #include "viewporter-client-protocol.h"
@@ -29,6 +30,7 @@
 
 // Local headers
 #include "init_window.h"
+#include "dmabufs.h"
 #include "pollqueue.h"
 
 //#include "log.h"
@@ -88,6 +90,7 @@ typedef struct wayland_out_env_s {
 
     int show_all;
     int fullscreen;
+    int prod_fd;
 
     pthread_mutex_t q_lock;
     sem_t egl_setup_sem;
@@ -98,6 +101,8 @@ typedef struct wayland_out_env_s {
     AVFrame *q_next;
 
     bool frame_wait;
+
+    struct dmabufs_ctl * dbsc;
 } wayland_out_env_t;
 
 // Structure that holds context whilst waiting for fence release
@@ -109,6 +114,11 @@ struct dmabuf_w_env_s {
     window_ctx_t *wc;
 };
 
+typedef struct sw_dmabuf_s {
+    AVDRMFrameDescriptor desc;
+    struct dmabuf_h * dh;
+} sw_dmabuf_t;
+
 
 #define WINDOW_WIDTH 1280
 #define WINDOW_HEIGHT 720
@@ -119,6 +129,66 @@ static inline uint64_t
 canon_mod(const uint64_t m)
 {
     return fourcc_mod_is_vendor(m, BROADCOM) ? fourcc_mod_broadcom_mod(m) : m;
+}
+
+static const struct {
+    enum AVPixelFormat pixfmt;
+    uint32_t drm_format;
+    uint64_t mod; // 0 = LINEAR
+} fmt_table[] = {
+    // Monochrome.
+#ifdef DRM_FORMAT_R8
+    { AV_PIX_FMT_GRAY8,    DRM_FORMAT_R8,      DRM_FORMAT_MOD_LINEAR},
+#endif
+#ifdef DRM_FORMAT_R16
+    { AV_PIX_FMT_GRAY16LE, DRM_FORMAT_R16,     DRM_FORMAT_MOD_LINEAR},
+    { AV_PIX_FMT_GRAY16BE, DRM_FORMAT_R16      | DRM_FORMAT_BIG_ENDIAN, DRM_FORMAT_MOD_LINEAR },
+#endif
+    // <8-bit RGB.
+    { AV_PIX_FMT_BGR8,     DRM_FORMAT_BGR233,  DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_RGB555LE, DRM_FORMAT_XRGB1555, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_RGB555BE, DRM_FORMAT_XRGB1555 | DRM_FORMAT_BIG_ENDIAN, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_BGR555LE, DRM_FORMAT_XBGR1555, DRM_FORMAT_MOD_LINEAR},
+    { AV_PIX_FMT_BGR555BE, DRM_FORMAT_XBGR1555 | DRM_FORMAT_BIG_ENDIAN, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_RGB565LE, DRM_FORMAT_RGB565,  DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_RGB565BE, DRM_FORMAT_RGB565   | DRM_FORMAT_BIG_ENDIAN, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_BGR565LE, DRM_FORMAT_BGR565,  DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_BGR565BE, DRM_FORMAT_BGR565   | DRM_FORMAT_BIG_ENDIAN, DRM_FORMAT_MOD_LINEAR },
+    // 8-bit RGB.
+    { AV_PIX_FMT_RGB24,    DRM_FORMAT_RGB888,   DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_BGR24,    DRM_FORMAT_BGR888,   DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_0RGB,     DRM_FORMAT_BGRX8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_0BGR,     DRM_FORMAT_RGBX8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_RGB0,     DRM_FORMAT_XBGR8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_BGR0,     DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_ARGB,     DRM_FORMAT_BGRA8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_ABGR,     DRM_FORMAT_RGBA8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_RGBA,     DRM_FORMAT_ABGR8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_BGRA,     DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR },
+    // 10-bit RGB.
+    { AV_PIX_FMT_X2RGB10LE, DRM_FORMAT_XRGB2101010, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_X2RGB10BE, DRM_FORMAT_XRGB2101010 | DRM_FORMAT_BIG_ENDIAN, DRM_FORMAT_MOD_LINEAR },
+    // 8-bit YUV 4:2:0.
+    { AV_PIX_FMT_YUV420P,  DRM_FORMAT_YUV420,  DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_NV12,     DRM_FORMAT_NV12,    DRM_FORMAT_MOD_LINEAR },
+    // 8-bit YUV 4:2:2.
+    { AV_PIX_FMT_YUYV422,  DRM_FORMAT_YUYV,    DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_YVYU422,  DRM_FORMAT_YVYU,    DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_UYVY422,  DRM_FORMAT_UYVY,    DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_NONE,     0,                  DRM_FORMAT_MOD_INVALID }
+};
+
+uint32_t
+fmt_to_drm(enum AVPixelFormat pixfmt, uint64_t * pMod)
+{
+    unsigned int i;
+    for (i = 0; fmt_table[i].pixfmt != AV_PIX_FMT_NONE; ++i) {
+        if (fmt_table[i].pixfmt == pixfmt)
+            break;
+    }
+    if (pMod != NULL)
+        *pMod = fmt_table[i].mod;
+    return fmt_table[i].drm_format;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,7 +328,9 @@ static void
 do_display_dmabuf(window_ctx_t *const wc, AVFrame *const frame)
 {
     struct zwp_linux_buffer_params_v1 *params;
-    const AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor *)frame->data[0];
+    const AVDRMFrameDescriptor *desc = frame->format == AV_PIX_FMT_DRM_PRIME ?
+        (AVDRMFrameDescriptor * ) frame->data[0] :
+        &((sw_dmabuf_t *)(frame->buf[0]->data))->desc;
     const uint32_t format = desc->layers[0].format;
     const uint64_t cmod = canon_mod(desc->objects[0].format_modifier);
     const unsigned int width = av_frame_cropped_width(frame);
@@ -361,7 +433,9 @@ check_support_egl(window_ctx_t *const wc, const uint32_t fmt, const uint64_t mod
 static void
 do_display_egl(window_ctx_t *const wc, AVFrame *const frame)
 {
-    const AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor *)frame->data[0];
+    const AVDRMFrameDescriptor *desc = frame->format == AV_PIX_FMT_DRM_PRIME ?
+        (AVDRMFrameDescriptor * ) frame->data[0] :
+        &((sw_dmabuf_t *)(frame->buf[0]->data))->desc;
     EGLint attribs[50];
     EGLint *a = attribs;
     int i, j;
@@ -699,6 +773,189 @@ do_egl_setup(void *v, short revents)
 fail:
     woe->egl_setup_fail = true;
     sem_post(&woe->egl_setup_sem);
+}
+
+// ---------------------------------------------------------------------------
+//
+// get_buffer2 for s/w decoders
+
+#if 0
+typedef struct gb2_dmabuf_s
+{
+    void * fb; // ***********************
+} gb2_dmabuf_t;
+
+static void
+do_prod(void *v)
+{
+    static const uint64_t one = 1;
+    wayland_out_env_t *const woe = v;
+    write(woe->prod_fd, &one, sizeof(one));
+}
+
+static void gb2_free(void * v, uint8_t * data)
+{
+    gb2_dmabuf_t * const gb2 = v;
+    (void)data;
+
+//    drmu_fb_unref(&gb2->fb); //*******************
+    free(gb2);
+}
+#endif
+
+static void sw_dmabuf_free(void *opaque, uint8_t *data)
+{
+    sw_dmabuf_t * const swd = opaque;
+    (void)data;
+    dmabuf_free(swd->dh);
+    free(swd);
+}
+
+static AVBufferRef *
+sw_dmabuf_make(struct AVCodecContext * const avctx, wayland_out_env_t * const woe, const AVFrame * const frame)
+{
+    sw_dmabuf_t * const swd = calloc(1, sizeof(*swd));
+    AVBufferRef * buf;
+    int linesize[4];
+    int w = frame->width;
+    int h = frame->height;
+    int unaligned;
+    ptrdiff_t linesize1[4];
+    size_t size[4];
+    int stride_align[AV_NUM_DATA_POINTERS];
+    size_t total_size;
+    unsigned int i;
+    unsigned int planes;
+    uint64_t drm_mod;
+    const uint32_t drm_fmt = fmt_to_drm(frame->format, &drm_mod);
+    int ret;
+
+    if (swd == NULL)
+        return NULL;
+
+    if (drm_fmt == 0 ||
+        (buf = av_buffer_create((uint8_t*)swd, sizeof(*swd), sw_dmabuf_free, swd, 0)) == NULL) {
+        free(swd);
+        return NULL;
+    }
+
+    // Size & align code taken from libavcodec/getbuffer.c:update_frame_pool
+    avcodec_align_dimensions2(avctx, &w, &h, stride_align);
+
+    do {
+        // NOTE: do not align linesizes individually, this breaks e.g. assumptions
+        // that linesize[0] == 2*linesize[1] in the MPEG-encoder for 4:2:2
+        ret = av_image_fill_linesizes(linesize, avctx->pix_fmt, w);
+        if (ret < 0)
+            goto fail;
+        // increase alignment of w for next try (rhs gives the lowest bit set in w)
+        w += w & ~(w - 1);
+
+        unaligned = 0;
+        for (i = 0; i < 4; i++)
+            unaligned |= linesize[i] % stride_align[i];
+    } while (unaligned);
+
+    for (i = 0; i < 4; i++)
+        linesize1[i] = linesize[i];
+    ret = av_image_fill_plane_sizes(size, avctx->pix_fmt, h, linesize1);
+    if (ret < 0)
+        goto fail;
+
+    total_size = 0;
+    for (planes = 0; planes != 4 && size[planes] != 0; ++planes)
+        total_size += size[planes];
+
+    if ((swd->dh = dmabuf_alloc(woe->dbsc, total_size)) == NULL) {
+        fprintf(stderr, "dmabuf_alloc failed\n");
+        goto fail;
+    }
+
+    swd->desc.nb_objects = 1;
+    swd->desc.objects[0].fd = dmabuf_fd(swd->dh);
+    swd->desc.objects[0].size = dmabuf_size(swd->dh);
+    swd->desc.objects[0].format_modifier = drm_mod;
+    swd->desc.nb_layers = 1;
+    swd->desc.layers[0].format = drm_fmt;
+    swd->desc.layers[0].nb_planes = planes;
+    total_size = 0;
+    for (i = 0; i != planes; ++i) {
+        AVDRMPlaneDescriptor *const p = swd->desc.layers[0].planes + i;
+        p->object_index = 0;
+        p->offset = total_size;
+        p->pitch = linesize1[i];
+        total_size += size[i];
+    }
+
+    return buf;
+
+fail:
+    av_buffer_unref(&buf);
+    return NULL;
+}
+
+static void
+sw_dmabuf_frame_fill(AVFrame * const frame, const AVBufferRef * const buf)
+{
+    const sw_dmabuf_t *const swd = (sw_dmabuf_t *)buf->data;
+    uint8_t * const data = dmabuf_map(swd->dh);
+    int i;
+
+    for (i = 0; i != swd->desc.layers[0].nb_planes; ++i) {
+        frame->data[i] = data + swd->desc.layers[0].planes[i].offset;
+        frame->linesize[i] = swd->desc.layers[0].planes[i].pitch;
+    }
+}
+
+// Assumes drmprime_out_env in s->opaque
+int egl_wayland_out_get_buffer2(struct AVCodecContext *s, AVFrame *frame, int flags)
+{
+#if 1
+    wayland_out_env_t * const woe = s->opaque;
+    (void)flags;
+
+    frame->opaque = woe;
+    frame->buf[0] = sw_dmabuf_make(s, woe, frame);
+    sw_dmabuf_frame_fill(frame, frame->buf[0]);
+
+#else
+    drmprime_out_env_t * const dpo = s->opaque;
+    int align[AV_NUM_DATA_POINTERS];
+    int w = frame->width;
+    int h = frame->height;
+    uint64_t mod;
+    const uint32_t fmt = drmu_av_fmt_to_drm(frame->format, &mod);
+    unsigned int i;
+    unsigned int layers;
+    const drmu_fmt_info_t * fmti;
+    gb2_dmabuf_t * gb2;
+    (void)flags;
+
+    assert((s->codec->capabilities & AV_CODEC_CAP_DR1) != 0);
+    assert(fmt != 0);
+
+    // Alignment logic taken directly from avcodec_default_get_buffer2
+    avcodec_align_dimensions2(s, &w, &h, align);
+
+    gb2 = calloc(1, sizeof(*gb2));
+    if ((gb2->fb = drmu_pool_fb_new(dpo->pic_pool, w, h, fmt, mod)) == NULL)
+        return AVERROR(ENOMEM);
+
+    frame->buf[0] = av_buffer_create((uint8_t*)gb2, sizeof(*gb2), gb2_free, gb2, 0);
+
+    fmti = drmu_fb_format_info_get(gb2->fb);
+    layers = drmu_fmt_info_plane_count(fmti);
+
+    for (i = 0; i != layers; ++i) {
+        frame->data[i] = drmu_fb_data(gb2->fb, i);
+        frame->linesize[i] = drmu_fb_pitch(gb2->fb, i);
+    }
+
+    drmu_fb_write_start(gb2->fb);
+
+    frame->opaque = dpo;
+#endif
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1104,6 +1361,10 @@ egl_wayland_out_display(wayland_out_env_t *woe, AVFrame *src_frame)
             return AVERROR(EINVAL);
         }
     }
+    else if (src_frame->opaque == woe) {
+        frame = av_frame_alloc();
+        av_frame_ref(frame, src_frame);
+    }
     else {
         LOG("Frame (format=%d) not DRM_PRiME\n", src_frame->format);
         return AVERROR(EINVAL);
@@ -1181,6 +1442,8 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
     pthread_mutex_init(&woe->q_lock, NULL);
     sem_init(&woe->egl_setup_sem, 0, 0);
     sem_init(&woe->q_sem, 0, 1);
+
+    woe->dbsc = dmabufs_ctl_new_vidbuf_cached();
 
     fmt_list_init(&wc->fmt_list, 16);
 

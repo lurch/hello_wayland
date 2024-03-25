@@ -335,6 +335,7 @@ int main(int argc, char *argv[])
     const char * out_name = NULL;
     bool wants_deinterlace = false;
     long pace_input_hz = 0;
+    bool try_hw = true;
     bool use_dmabuf = false;
     bool fullscreen = false;
     bool no_wait = false;
@@ -462,6 +463,7 @@ loopy:
         return -1;
     }
 
+retry_hw:
     /* find the video stream information */
     ret = av_find_best_stream(input_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, &decoder, 0);
     if (ret < 0) {
@@ -470,29 +472,23 @@ loopy:
     }
     video_stream = ret;
 
-    if (decoder->id == AV_CODEC_ID_H264) {
-        if ((decoder = avcodec_find_decoder_by_name("h264_v4l2m2m")) == NULL) {
+    hw_pix_fmt = AV_PIX_FMT_NONE;
+    if (!try_hw) {
+        /* Nothing */
+    }
+    else if (decoder->id == AV_CODEC_ID_H264) {
+        if ((decoder = avcodec_find_decoder_by_name("h264_v4l2m2m")) == NULL)
             fprintf(stderr, "Cannot find the h264 v4l2m2m decoder\n");
-            return -1;
-        }
-        hw_pix_fmt = AV_PIX_FMT_DRM_PRIME;
+        else
+            hw_pix_fmt = AV_PIX_FMT_DRM_PRIME;
     }
-#if 0
-    else if (decoder->id == AV_CODEC_ID_HEVC) {
-        if ((decoder = avcodec_find_decoder_by_name("hevc_v4l2m2m")) == NULL) {
-            fprintf(stderr, "Cannot find the hevc v4l2m2m decoder\n");
-            return -1;
-        }
-        hw_pix_fmt = AV_PIX_FMT_DRM_PRIME;
-    }
-#endif
     else {
         for (i = 0;; i++) {
             const AVCodecHWConfig *config = avcodec_get_hw_config(decoder, i);
             if (!config) {
                 fprintf(stderr, "Decoder %s does not support device type %s.\n",
                         decoder->name, av_hwdevice_get_type_name(type));
-                return -1;
+                break;
             }
             if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
                 config->device_type == type) {
@@ -502,6 +498,11 @@ loopy:
         }
     }
 
+    if (hw_pix_fmt == AV_PIX_FMT_NONE && try_hw) {
+        fprintf(stderr, "No h/w format found - trying s/w\n");
+        try_hw = false;
+    }
+
     if (!(decoder_ctx = avcodec_alloc_context3(decoder)))
         return AVERROR(ENOMEM);
 
@@ -509,18 +510,46 @@ loopy:
     if (avcodec_parameters_to_context(decoder_ctx, video->codecpar) < 0)
         return -1;
 
-    decoder_ctx->get_format  = get_hw_format;
+    if (try_hw) {
+        decoder_ctx->get_format  = get_hw_format;
 
-    if (hw_decoder_init(decoder_ctx, type) < 0)
-        return -1;
+        if (hw_decoder_init(decoder_ctx, type) < 0)
+            return -1;
 
-    decoder_ctx->thread_count = 3;
-    decoder_ctx->flags = AV_CODEC_FLAG_LOW_DELAY;
+        decoder_ctx->pix_fmt = AV_PIX_FMT_DRM_PRIME;
+        decoder_ctx->sw_pix_fmt = AV_PIX_FMT_NONE;
+
+        decoder_ctx->thread_count = 3;
+    }
+    else {
+        decoder_ctx->get_buffer2 = egl_wayland_out_get_buffer2;
+        decoder_ctx->opaque = dpo;
+        decoder_ctx->thread_count = 0; // FFmpeg will pick a default
+    }
+    decoder_ctx->flags = 0;
+    // Pick any threading method
+    decoder_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+
+#if LIBAVCODEC_VERSION_MAJOR < 60
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    decoder_ctx->thread_safe_callbacks = 1;
+#pragma GCC diagnostic pop
+#endif
 
     if ((ret = avcodec_open2(decoder_ctx, decoder, &codec_opts)) < 0) {
+        if (try_hw) {
+            try_hw = false;
+            avcodec_free_context(&decoder_ctx);
+
+            printf("H/w init failed - trying s/w\n");
+            goto retry_hw;
+        }
         fprintf(stderr, "Failed to open codec for stream #%u\n", video_stream);
         return -1;
     }
+
+    printf("Pixfmt after init: %s / %s\n", av_get_pix_fmt_name(decoder_ctx->pix_fmt), av_get_pix_fmt_name(decoder_ctx->sw_pix_fmt));
 
     if (wants_deinterlace) {
         if (init_filters(video, decoder_ctx, "deinterlace_v4l2m2m") < 0) {
