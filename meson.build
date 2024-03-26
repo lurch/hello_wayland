@@ -44,7 +44,7 @@ foreach protodef: protocol_defs
     protocols_files += [custom_target(protodef.get(1),
       output : protodef.get(1),
       input : xmlfile,
-      command : [wl_scanner, 'code', '@INPUT@', '@OUTPUT@'])]
+      command : [wl_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])]
 
     protocols_files += [custom_target(protodef.get(2),
       output : protodef.get(2),
