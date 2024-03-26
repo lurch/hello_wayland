@@ -29,8 +29,9 @@
 #include "xdg-decoration-unstable-v1-client-protocol.h"
 
 // Local headers
-#include "init_window.h"
 #include "dmabuf_alloc.h"
+#include "dmabuf_pool.h"
+#include "init_window.h"
 #include "pollqueue.h"
 
 //#include "log.h"
@@ -102,7 +103,7 @@ typedef struct wayland_out_env_s {
 
     bool frame_wait;
 
-    struct dmabufs_ctl * dbsc;
+    dmabuf_pool_t * dpool;
 } wayland_out_env_t;
 
 // Structure that holds context whilst waiting for fence release
@@ -866,7 +867,7 @@ sw_dmabuf_make(struct AVCodecContext * const avctx, wayland_out_env_t * const wo
     for (planes = 0; planes != 4 && size[planes] != 0; ++planes)
         total_size += size[planes];
 
-    if ((swd->dh = dmabuf_alloc(woe->dbsc, total_size)) == NULL) {
+    if ((swd->dh = dmabuf_pool_fb_new(woe->dpool, total_size)) == NULL) {
         fprintf(stderr, "dmabuf_alloc failed\n");
         goto fail;
     }
@@ -1416,6 +1417,7 @@ egl_wayland_out_delete(wayland_out_env_t *woe)
     wl_display_disconnect(wc->w_display);
     fmt_list_uninit(&wc->fmt_list);
 
+    dmabuf_pool_kill(&woe->dpool);
     av_frame_free(&woe->q_next);
     sem_destroy(&woe->q_sem);
     sem_destroy(&woe->egl_setup_sem);
@@ -1443,7 +1445,11 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
     sem_init(&woe->egl_setup_sem, 0, 0);
     sem_init(&woe->q_sem, 0, 1);
 
-    woe->dbsc = dmabufs_ctl_new();
+    {
+        struct dmabufs_ctl * dbsc = dmabufs_ctl_new();
+        woe->dpool = dmabuf_pool_new_dmabufs(dbsc, 32);
+        dmabufs_ctl_unref(&dbsc);
+    }
 
     fmt_list_init(&wc->fmt_list, 16);
 
