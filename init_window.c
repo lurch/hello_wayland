@@ -992,7 +992,11 @@ try_display(wayland_out_env_t *const woe)
     window_ctx_t *const wc = &woe->wc;
     AVFrame *frame;
 
-    if (woe->frame_wait)
+    // Wait for prod from frame_done if show_all;
+    // Just give up if pollqueue has been deleted (might happen during
+    // shutdown on a late frame_done callback - race avoided as once pq
+    // has been killed wayland needs manual roundtrips)
+    if (woe->frame_wait || woe->wc.pq == NULL)
         return;
 
     pthread_mutex_lock(&woe->q_lock);
@@ -1417,6 +1421,7 @@ egl_wayland_out_delete(wayland_out_env_t *woe)
     wl_display_disconnect(wc->w_display);
     fmt_list_uninit(&wc->fmt_list);
 
+    av_frame_free(&woe->q_next);
     dmabuf_pool_kill(&woe->dpool);
     av_frame_free(&woe->q_next);
     sem_destroy(&woe->q_sem);
