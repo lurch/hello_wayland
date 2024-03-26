@@ -30,7 +30,7 @@
 
 // Local headers
 #include "init_window.h"
-#include "dmabufs.h"
+#include "dmabuf_alloc.h"
 #include "pollqueue.h"
 
 //#include "log.h"
@@ -807,7 +807,7 @@ static void sw_dmabuf_free(void *opaque, uint8_t *data)
 {
     sw_dmabuf_t * const swd = opaque;
     (void)data;
-    dmabuf_free(swd->dh);
+    dmabuf_unref(&swd->dh);
     free(swd);
 }
 
@@ -1443,7 +1443,7 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
     sem_init(&woe->egl_setup_sem, 0, 0);
     sem_init(&woe->q_sem, 0, 1);
 
-    woe->dbsc = dmabufs_ctl_new_vidbuf_cached();
+    woe->dbsc = dmabufs_ctl_new();
 
     fmt_list_init(&wc->fmt_list, 16);
 
