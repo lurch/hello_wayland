@@ -90,7 +90,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 }
 
 static int decode_write(AVCodecContext * const avctx,
-                        egl_wayland_out_env_t * const dpo,
+                        wayland_out_env_t * const dpo,
                         AVPacket *packet)
 {
     AVFrame *frame = NULL, *sw_frame = NULL;
@@ -329,7 +329,7 @@ int main(int argc, char *argv[])
     unsigned int in_n = 0;
     const char * hwdev = "drm";
     int i;
-    egl_wayland_out_env_t * dpo;
+    wayland_out_env_t * dpo;
     long loop_count = 1;
     long frame_count = -1;
     const char * out_name = NULL;

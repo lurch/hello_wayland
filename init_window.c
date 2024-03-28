@@ -25,6 +25,7 @@
 // protocol headers that we build as part of the compile
 #include "viewporter-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
+#include "single-pixel-buffer-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
 
@@ -37,7 +38,7 @@
 //#include "log.h"
 #define LOG printf
 
-#define TRACE_ALL 0
+#define TRACE_ALL 1
 
 typedef struct fmt_ent_s {
     uint32_t fmt;
@@ -50,6 +51,12 @@ typedef struct fmt_list_s {
     unsigned int len;
 } fmt_list_t;
 
+typedef struct subplane_s {
+    struct wl_surface * surface;
+    struct wl_subsurface * subsurface;
+    struct wp_viewport * viewport;
+} subplane_t;
+
 typedef struct window_ctx_s {
     struct wl_display *w_display;
     int window_width;
@@ -60,16 +67,21 @@ typedef struct window_ctx_s {
 
     // Bound wayland extensions
     struct wl_compositor *compositor;
+    struct wl_subcompositor *subcompositor;
     struct zwp_linux_dmabuf_v1 *linux_dmabuf_v1;
     struct zxdg_decoration_manager_v1 *decoration_manager;
     struct wp_viewporter *viewporter;
     struct xdg_wm_base *wm_base;
+    struct wp_single_pixel_buffer_manager_v1 * single_pixel_manager;
 
     // Wayland objects
-    struct wl_surface *surface;
-    struct wp_viewport *viewport;
+    struct wl_surface *win_surface;
+    struct wp_viewport *win_viewport;
+    struct wl_buffer *win_buffer;
+    subplane_t vid;
     struct xdg_surface *wm_surface;
     struct xdg_toplevel *wm_toplevel;
+    struct wl_region * region_all;
 
     struct wl_callback *frame_callback;
 
@@ -390,10 +402,14 @@ do_display_dmabuf(window_ctx_t *const wc, AVFrame *const frame)
     wl_buffer_add_listener(w_buffer, &w_buffer_listener,
                            dmabuf_w_env_new(wc, frame->buf[0], desc->objects[0].fd));
 
-    wl_surface_attach(wc->surface, w_buffer, 0, 0);
-    wp_viewport_set_destination(wc->viewport, wc->req_w, wc->req_h);
-    wl_surface_damage(wc->surface, 0, 0, INT32_MAX, INT32_MAX);
-    wl_surface_commit(wc->surface);
+    wl_surface_attach(wc->vid.surface, w_buffer, 0, 0);
+    // **** Letterbox/Pillarbox
+    wp_viewport_set_destination(wc->vid.viewport, wc->req_w, wc->req_h);
+    wl_surface_damage(wc->vid.surface, 0, 0, INT32_MAX, INT32_MAX);
+    wl_surface_commit(wc->vid.surface);
+    wl_surface_attach(wc->win_surface, wc->win_buffer, 0, 0);
+    wp_viewport_set_destination(wc->win_viewport, wc->req_w, wc->req_h);
+    wl_surface_commit(wc->win_surface);
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +551,10 @@ do_display_egl(window_ctx_t *const wc, AVFrame *const frame)
         dbe->pt = polltask_new(dbe->pq, desc->objects[0].fd, POLLOUT, dmabuf_fence_release_cb, dbe);
         pollqueue_add_task(dbe->pt, -1);
     }
+
+    wl_surface_attach(wc->win_surface, wc->win_buffer, 0, 0);
+    wp_viewport_set_destination(wc->win_viewport, wc->req_w, wc->req_h);
+    wl_surface_commit(wc->win_surface);
 }
 
 // ---------------------------------------------------------------------------
@@ -710,7 +730,7 @@ CreateEGLContext(window_ctx_t *const wc)
     }
 
     wc->w_egl_window =
-        wl_egl_window_create(wc->surface, wc->window_width, wc->window_height);
+        wl_egl_window_create(wc->vid.surface, wc->window_width, wc->window_height);
 
     if (wc->w_egl_window == EGL_NO_SURFACE) {
         LOG("No window !?\n");
@@ -1006,7 +1026,7 @@ try_display(wayland_out_env_t *const woe)
 
     if (frame) {
         static const struct wl_callback_listener frame_listener = { .done = surface_frame_done_cb };
-        wc->frame_callback = wl_surface_frame(wc->surface);
+        wc->frame_callback = wl_surface_frame(wc->vid.surface);
         wl_callback_add_listener(wc->frame_callback, &frame_listener, woe);
         woe->frame_wait = true;
         if (woe->show_all)
@@ -1018,6 +1038,83 @@ try_display(wayland_out_env_t *const woe)
             do_display_dmabuf(wc, frame);
         av_frame_free(&frame);
     }
+}
+
+// ---------------------------------------------------------------------------
+//
+// (sub)plane helpers
+
+static void
+buffer_destroy(struct wl_buffer ** ppbuffer)
+{
+    struct wl_buffer * const buffer = *ppbuffer;
+    if (buffer == NULL)
+        return;
+    *ppbuffer = NULL;
+    wl_buffer_destroy(buffer);
+}
+
+static void
+region_destroy(struct wl_region ** const ppregion)
+{
+    if (*ppregion == NULL)
+        return;
+    wl_region_destroy(*ppregion);
+    *ppregion = NULL;
+}
+
+static void
+subsurface_destroy(struct wl_subsurface ** const ppsubsurface)
+{
+    if (*ppsubsurface == NULL)
+        return;
+    wl_subsurface_destroy(*ppsubsurface);
+    *ppsubsurface = NULL;
+}
+
+static void
+surface_destroy(struct wl_surface ** const ppsurface)
+{
+    if (*ppsurface == NULL)
+        return;
+    wl_surface_destroy(*ppsurface);
+    *ppsurface = NULL;
+}
+
+static void
+viewport_destroy(struct wp_viewport ** const ppviewport)
+{
+    if (*ppviewport == NULL)
+        return;
+    wp_viewport_destroy(*ppviewport);
+    *ppviewport = NULL;
+}
+
+static void
+plane_destroy(subplane_t * const spl)
+{
+    viewport_destroy(&spl->viewport);
+    subsurface_destroy(&spl->subsurface);
+    surface_destroy(&spl->surface);
+}
+
+static int
+plane_create(window_ctx_t * const wc, subplane_t * const plane,
+             struct wl_surface * const parent,
+             struct wl_surface * const above,
+             const bool sync)
+{
+    if ((plane->surface = wl_compositor_create_surface(wc->compositor)) == NULL ||
+        (plane->subsurface = wl_subcompositor_get_subsurface(wc->subcompositor, plane->surface, parent)) == NULL ||
+        (plane->viewport = wp_viewporter_get_viewport(wc->viewporter, plane->surface)) == NULL)
+        return -1;
+    wl_subsurface_place_above(plane->subsurface, above);
+    if (sync)
+        wl_subsurface_set_sync(plane->subsurface);
+    else
+        wl_subsurface_set_desync(plane->subsurface);
+//    wl_surface_set_input_region(plane->surface, sys->region_none);
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1191,6 +1288,10 @@ global_registry_handler(void *data, struct wl_registry *registry, uint32_t id,
         wc->decoration_manager = wl_registry_bind(registry, id, &zxdg_decoration_manager_v1_interface, 1);
     if (strcmp(interface, wp_viewporter_interface.name) == 0)
         wc->viewporter = wl_registry_bind(registry, id, &wp_viewporter_interface, 1);
+    if (strcmp(interface, wp_single_pixel_buffer_manager_v1_interface.name) == 0)
+        wc->single_pixel_manager = wl_registry_bind(registry, id, &wp_single_pixel_buffer_manager_v1_interface, 1);
+    if (strcmp(interface, wl_subcompositor_interface.name) == 0)
+        wc->subcompositor = wl_registry_bind(registry, id, &wl_subcompositor_interface, 1);
 }
 
 static void
@@ -1253,8 +1354,10 @@ destroy_window(window_ctx_t *const wc)
     if (!wc->w_display)
         return;
 
-    if (wc->viewport)
-        wp_viewport_destroy(wc->viewport);
+    plane_destroy(&wc->vid);
+
+    if (wc->win_viewport)
+        wp_viewport_destroy(wc->win_viewport);
 
     if (wc->egl_surface)
         eglDestroySurface(wc->egl_display, wc->egl_surface);
@@ -1267,8 +1370,7 @@ destroy_window(window_ctx_t *const wc)
         xdg_toplevel_destroy(wc->wm_toplevel);
     if (wc->wm_surface)
         xdg_surface_destroy(wc->wm_surface);
-    if (wc->surface)
-        wl_surface_destroy(wc->surface);
+    surface_destroy(&wc->win_surface);
 
     // The frame callback would destroy this but there is no guarantee it
     // would ever be called so there is no point waiting
@@ -1283,8 +1385,14 @@ destroy_window(window_ctx_t *const wc)
         wp_viewporter_destroy(wc->viewporter);
     if (wc->linux_dmabuf_v1)
         zwp_linux_dmabuf_v1_destroy(wc->linux_dmabuf_v1);
+    if (wc->single_pixel_manager)
+        wp_single_pixel_buffer_manager_v1_destroy(wc->single_pixel_manager);
+    if (wc->subcompositor)
+        wl_subcompositor_destroy(wc->subcompositor);
     if (wc->compositor)
         wl_compositor_destroy(wc->compositor);
+
+    region_destroy(&wc->region_all);
 
     wl_display_roundtrip(wc->w_display);
 }
@@ -1409,11 +1517,18 @@ egl_wayland_out_delete(wayland_out_env_t *woe)
 
     LOG("<<< %s\n", __func__);
 
-    if (wc->surface) {
-        wl_surface_attach(wc->surface, NULL, 0, 0);
-        wl_surface_commit(wc->surface);
-        wl_display_flush(wc->w_display);
+    if (wc->vid.surface)
+    {
+        wl_surface_attach(wc->vid.surface, NULL, 0, 0);
+        wl_surface_commit(wc->vid.surface);
     }
+    if (wc->win_surface) {
+        wl_surface_attach(wc->win_surface, NULL, 0, 0);
+        wl_surface_commit(wc->win_surface);
+    }
+    buffer_destroy(&wc->win_buffer);
+    if (wc->w_display)
+        wl_display_flush(wc->w_display);
 
     pollqueue_finish(&wc->pq);
 
@@ -1478,13 +1593,12 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
         goto fail;
     }
 
-    if ((wc->surface = wl_compositor_create_surface(wc->compositor)) == NULL) {
+    if ((wc->win_surface = wl_compositor_create_surface(wc->compositor)) == NULL) {
         LOG("No Compositor surface\n");
         goto fail;
     }
-
-    wc->viewport = wp_viewporter_get_viewport(wc->viewporter, wc->surface);
-    wc->wm_surface = xdg_wm_base_get_xdg_surface(wc->wm_base, wc->surface);
+    wc->win_viewport = wp_viewporter_get_viewport(wc->viewporter, wc->win_surface);
+    wc->wm_surface = xdg_wm_base_get_xdg_surface(wc->wm_base, wc->win_surface);
 
     xdg_surface_add_listener(wc->wm_surface, &xdg_surface_listener, woe);
 
@@ -1508,19 +1622,21 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
         // decoration destroyed in the callback
     }
 
-    {
-        struct wl_region *const region = wl_compositor_create_region(wc->compositor);
+    wl_surface_commit(wc->win_surface);
+    wl_display_roundtrip(wc->w_display);
 
-        wl_region_add(region, 0, 0, wc->req_w, wc->req_h);
-        wl_surface_set_opaque_region(wc->surface, region);
-        wl_region_destroy(region);
+    wc->region_all = wl_compositor_create_region(wc->compositor);
+    wl_region_add(wc->region_all, 0, 0, INT32_MAX, INT32_MAX);
 
-        LOG("%s: %dx%d\n", __func__, wc->req_w, wc->req_h);
-        wc->window_width = wc->req_w;
-        wc->window_height = wc->req_h;
-    }
+    wc->win_buffer = wp_single_pixel_buffer_manager_v1_create_u32_rgba_buffer(
+        wc->single_pixel_manager, 0, 0, 0, UINT32_MAX);  // R, G, B, A
+    LOG("%s: %dx%d\n", __func__, wc->req_w, wc->req_h);
+    wc->window_width = wc->req_w;
+    wc->window_height = wc->req_h;
 
-    wl_surface_commit(wc->surface);
+    plane_create(wc, &wc->vid, wc->win_surface, wc->win_surface, false);
+
+    wl_surface_commit(wc->win_surface);
 
     wc->pq = pollqueue_new();
     pollqueue_set_pre_post(wc->pq, pollq_pre_cb, pollq_post_cb, wc);
@@ -1554,5 +1670,58 @@ wayland_out_env_t*
 dmabuf_wayland_out_new(unsigned int flags)
 {
     return wayland_out_new(false, flags);
+}
+
+// ===========================================================================
+
+typedef struct wo_rect_s {
+    int32_t x, y;
+    uint32_t w, h;
+} wo_rect_t;
+
+struct wo_surface_s {
+    wayland_out_env_t * woe;
+    wo_rect_t dest_rect;
+};
+
+struct wo_fb_s {
+    wayland_out_env_t * woe;
+    struct dmabuf_h * dh;
+    uint32_t fmt;
+    uint32_t width, height;
+    wo_rect_t crop;
+};
+
+wo_surface_t *
+wo_make_surface(wayland_out_env_t * woe)
+{
+    wo_surface_t * wos = calloc(1, sizeof(*wos));
+    if (wos != NULL)
+        return NULL;
+    wos->woe = woe;
+    return wos;
+}
+
+wo_fb_t *
+wo_make_fb(wayland_out_env_t * woe, struct dmabuf_h * dh, uint32_t fmt, uint32_t width, uint32_t height)
+{
+    wo_fb_t * wofb = calloc(1, sizeof(*wofb));
+    if (wofb == NULL)
+        return NULL;
+    wofb->woe = woe;
+    wofb->dh = dh;
+    wofb->fmt = fmt;
+    wofb->width = width;
+    wofb->height = height;
+    wofb->crop = (wo_rect_t){0,0,width,height};
+    return wofb;
+}
+
+int
+wo_surfece_attach_fb(wo_surface_t * wsurf, wo_fb_t * wfb)
+{
+    (void)wsurf;
+    (void)wfb;
+    return 0;
 }
 
