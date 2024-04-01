@@ -6,6 +6,8 @@ project(
 		'default_library=static']
 )
 
+conf_data = configuration_data()
+
 wl_client_dep = dependency('wayland-client')
 wl_protocol_dep = dependency('wayland-protocols')
 wl_egl_dep = dependency('wayland-egl')
@@ -59,9 +61,12 @@ extra_c_args = [
 
 dep_rt = meson.get_compiler('c').find_library('rt')
 
+subdir('freetype')
+
 executable('hello_wayland',
   wl_sources + protocols_files,
   install : true,
+  link_with : runticker_opt,
   dependencies : [wl_client_dep, wl_protocol_dep, wl_egl_dep, epoxy_dep, libdrm_dep,
     threads_dep,
     dep_rt,
@@ -71,3 +76,9 @@ executable('hello_wayland',
     dependency('libavutil'),
   ]
 )
+
+configure_file(
+	output : 'config.h',
+	configuration : conf_data
+)
+

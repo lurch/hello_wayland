@@ -31,6 +31,7 @@
  * This example shows how to do HW-accelerated decoding with output
  * frames from the HW video surfaces.
  */
+#include "config.h"
 
 #include <stdio.h>
 #include <stdbool.h>
@@ -47,6 +48,10 @@
 #include <libavfilter/buffersrc.h>
 
 #include "init_window.h"
+
+#if HAS_RUNTICKER
+#include <freetype/runticker.h>
+#endif
 
 static enum AVPixelFormat hw_pix_fmt;
 static FILE *output_file = NULL;
@@ -446,6 +451,10 @@ int main(int argc, char *argv[])
             return -1;
         }
     }
+
+#if HAS_RUNTICKER
+    runticker_start(dpo, 100, 500, 800, 100, "Wombats are go!", NULL);
+#endif
 
 loopy:
     in_file = in_filelist[in_n];

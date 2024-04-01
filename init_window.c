@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <string.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,7 +39,7 @@
 //#include "log.h"
 #define LOG printf
 
-#define TRACE_ALL 1
+#define TRACE_ALL 0
 
 typedef struct fmt_ent_s {
     uint32_t fmt;
@@ -492,6 +493,8 @@ do_display_egl(window_ctx_t *const wc, AVFrame *const frame)
         wl_egl_window_resize(wc->w_egl_window, wc->req_w, wc->req_h, 0, 0);
         wc->window_width = wc->req_w;
         wc->window_height = wc->req_h;
+        wp_viewport_set_destination(wc->vid.viewport, wc->req_w, wc->req_h);
+        wl_surface_commit(wc->vid.surface);
     }
 
     *a++ = EGL_WIDTH;
@@ -1674,21 +1677,21 @@ dmabuf_wayland_out_new(unsigned int flags)
 
 // ===========================================================================
 
-typedef struct wo_rect_s {
-    int32_t x, y;
-    uint32_t w, h;
-} wo_rect_t;
-
 struct wo_surface_s {
+    atomic_int ref_count;
+
     wayland_out_env_t * woe;
     wo_rect_t dest_rect;
 };
 
 struct wo_fb_s {
+    atomic_int ref_count;
+
     wayland_out_env_t * woe;
     struct dmabuf_h * dh;
     uint32_t fmt;
     uint32_t width, height;
+    uint64_t mod;
     wo_rect_t crop;
 };
 
@@ -1702,26 +1705,128 @@ wo_make_surface(wayland_out_env_t * woe)
     return wos;
 }
 
+void
+wo_surface_unref(wo_surface_t ** ppWs)
+{
+    wo_surface_t * const ws = *ppWs;
+    if (ws == NULL)
+        return;
+    if (atomic_fetch_sub(&ws->ref_count, 1) != 0)
+        return;
+    free(ws);
+}
+
 wo_fb_t *
-wo_make_fb(wayland_out_env_t * woe, struct dmabuf_h * dh, uint32_t fmt, uint32_t width, uint32_t height)
+wo_make_fb(wayland_out_env_t * woe, uint32_t width, uint32_t height, uint32_t fmt, uint64_t mod)
 {
     wo_fb_t * wofb = calloc(1, sizeof(*wofb));
     if (wofb == NULL)
         return NULL;
     wofb->woe = woe;
-    wofb->dh = dh;
+    // **** dmabuf env??
     wofb->fmt = fmt;
+    wofb->mod = mod;
     wofb->width = width;
     wofb->height = height;
     wofb->crop = (wo_rect_t){0,0,width,height};
     return wofb;
 }
 
+wo_fb_t *
+wo_fb_ref(wo_fb_t * wfb)
+{
+    return wfb;
+}
+
+void
+wo_fb_unref(wo_fb_t ** ppwfb)
+{
+    wo_fb_t * wfb = *ppwfb;
+
+    if (wfb == NULL)
+        return;
+
+    if (atomic_fetch_sub(&wfb->ref_count, 1) != 0)
+        return;
+
+    free(wfb);
+}
+
+unsigned int
+wo_fb_width(const wo_fb_t * wfb)
+{
+    return wfb->width;
+}
+
+unsigned int
+wo_fb_height(const wo_fb_t * wfb)
+{
+    return wfb->height;
+}
+
+unsigned int
+wo_fb_pitch(const wo_fb_t * wfb, const unsigned int plane)
+{
+    // *** pitch;
+    return plane != 0 ? 0 : wfb->width * 4;
+}
+
+void *
+wo_fb_data(const wo_fb_t * wfb, const unsigned int plane)
+{
+    return plane != 0 ? NULL : dmabuf_map(wfb->dh);
+}
+
+void
+wo_fb_crop_frac_set(wo_fb_t * wfb, const wo_rect_t crop)
+{
+    wfb->crop = crop;
+}
+
+void
+wo_fb_write_start(wo_fb_t * wfb)
+{
+    dmabuf_write_start(wfb->dh);
+}
+
+void
+wo_fb_write_end(wo_fb_t * wfb)
+{
+    dmabuf_write_end(wfb->dh);
+}
+
+void
+wo_fb_read_start(wo_fb_t * wfb)
+{
+    dmabuf_read_start(wfb->dh);
+}
+void
+wo_fb_read_end(wo_fb_t * wfb)
+{
+    dmabuf_read_end(wfb->dh);
+}
+
 int
-wo_surfece_attach_fb(wo_surface_t * wsurf, wo_fb_t * wfb)
+wo_surface_commit(wo_surface_t * wsurf)
+{
+    (void)wsurf;
+    return 0;
+}
+
+int
+wo_surface_dettach_fb(wo_surface_t * wsurf)
+{
+    (void)wsurf;
+    return 0;
+}
+
+int
+wo_surface_attach_fb(wo_surface_t * wsurf, wo_fb_t * wfb, const wo_rect_t dst_pos)
 {
     (void)wsurf;
     (void)wfb;
+    (void)dst_pos;
     return 0;
 }
+
 
