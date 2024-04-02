@@ -350,7 +350,7 @@ ticker_new(wayland_out_env_t *woe, unsigned int x, unsigned int y, unsigned int 
     }
 
     // This doesn't really want to be the primary
-    if ((te->dp = wo_make_surface(te->woe)) == NULL)
+    if ((te->dp = wo_make_surface_z(te->woe, 16)) == NULL)
     {
         fprintf(stderr, "Failed to find output plane");
         goto fail;

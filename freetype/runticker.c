@@ -49,8 +49,7 @@ runticker_thread(void * v)
     runticker_env_t * const dfte = v;
 
     while (!atomic_load(&dfte->kill) && ticker_run(dfte->te) >= 0) {
-        char evt_buf[8];
-        read(dfte->prod_fd, evt_buf, 8);
+        usleep(20000);
     }
 
     return NULL;
@@ -72,7 +71,7 @@ runticker_start(wayland_out_env_t * const dout,
     dfte->cchar = dfte->text;
 
     if ((dfte->te = ticker_new(dout, x, y, w, h)) == NULL) {
-        fprintf(stderr, "Failed to create ticker");
+        fprintf(stderr, "Failed to create ticker\n");
         goto fail;
     }
 
@@ -84,18 +83,18 @@ runticker_start(wayland_out_env_t * const dout,
     ticker_next_char_cb_set(dfte->te, next_char_cb, dfte);
 
     if ((dfte->prod_fd = eventfd(0, 0)) == -1) {
-        fprintf(stderr, "Failed to get event fd");
+        fprintf(stderr, "Failed to get event fd\n");
         goto fail;
     }
     ticker_commit_cb_set(dfte->te, do_prod, dfte);
 
     if (ticker_init(dfte->te) != 0) {
-        fprintf(stderr, "Failed to init ticker");
+        fprintf(stderr, "Failed to init ticker\n");
         goto fail;
     }
 
     if (pthread_create(&dfte->thread_id, NULL, runticker_thread, dfte) != 0) {
-        fprintf(stderr, "Failed to create thread");
+        fprintf(stderr, "Failed to create thread\n");
         goto fail;
     }
     dfte->thread_running = true;

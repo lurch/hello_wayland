@@ -344,6 +344,7 @@ int main(int argc, char *argv[])
     bool use_dmabuf = false;
     bool fullscreen = false;
     bool no_wait = false;
+    static const char fontfile[] = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf";
 
     {
         char * const * a = argv + 1;
@@ -453,7 +454,7 @@ int main(int argc, char *argv[])
     }
 
 #if HAS_RUNTICKER
-    runticker_start(dpo, 100, 500, 800, 100, "Wombats are go!", NULL);
+    runticker_start(dpo, 100, 500, 800, 100, "Wombats are go!", fontfile);
 #endif
 
 loopy:

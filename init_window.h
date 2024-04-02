@@ -31,8 +31,9 @@ typedef struct wo_rect_s {
     uint32_t w, h;
 } wo_rect_t;
 
-wo_surface_t * wo_make_surface(wayland_out_env_t * dpo);
+wo_surface_t * wo_make_surface_z(wayland_out_env_t * dpo, unsigned int z);
 void wo_surface_unref(wo_surface_t ** ppWs);
+wo_surface_t * wo_surface_ref(wo_surface_t * const wos);
 
 wo_fb_t * wo_make_fb(wayland_out_env_t * dpo, uint32_t width, uint32_t height, uint32_t fmt, uint64_t mod);
 wo_fb_t * wo_fb_ref(wo_fb_t * wfb);

@@ -116,7 +116,11 @@ typedef struct wayland_out_env_s {
 
     bool frame_wait;
 
+    struct dmabufs_ctl * dbsc;
     dmabuf_pool_t * dpool;
+
+    pthread_mutex_t surface_lock;
+    struct wo_surface_s * surface_chain;
 } wayland_out_env_t;
 
 // Structure that holds context whilst waiting for fence release
@@ -1542,8 +1546,11 @@ egl_wayland_out_delete(wayland_out_env_t *woe)
     av_frame_free(&woe->q_next);
     dmabuf_pool_kill(&woe->dpool);
     av_frame_free(&woe->q_next);
+    dmabufs_ctl_unref(&woe->dbsc);
+
     sem_destroy(&woe->q_sem);
     sem_destroy(&woe->egl_setup_sem);
+    pthread_mutex_destroy(&woe->surface_lock);
     pthread_mutex_destroy(&woe->q_lock);
 
     free(woe);
@@ -1565,14 +1572,12 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
     wc->req_h = WINDOW_HEIGHT;
 
     pthread_mutex_init(&woe->q_lock, NULL);
+    pthread_mutex_init(&woe->surface_lock, NULL);
     sem_init(&woe->egl_setup_sem, 0, 0);
     sem_init(&woe->q_sem, 0, 1);
 
-    {
-        struct dmabufs_ctl * dbsc = dmabufs_ctl_new();
-        woe->dpool = dmabuf_pool_new_dmabufs(dbsc, 32);
-        dmabufs_ctl_unref(&dbsc);
-    }
+    woe->dbsc = dmabufs_ctl_new();
+    woe->dpool = dmabuf_pool_new_dmabufs(woe->dbsc, 32);
 
     fmt_list_init(&wc->fmt_list, 16);
 
@@ -1679,10 +1684,17 @@ dmabuf_wayland_out_new(unsigned int flags)
 
 struct wo_surface_s {
     atomic_int ref_count;
+    struct wo_surface_s * next;
+    struct wo_surface_s * prev;
 
     wayland_out_env_t * woe;
+    unsigned int zpos;
     wo_rect_t dest_rect;
+
+    subplane_t s;
 };
+
+#define WO_FB_PLANES 4
 
 struct wo_fb_s {
     atomic_int ref_count;
@@ -1691,50 +1703,132 @@ struct wo_fb_s {
     struct dmabuf_h * dh;
     uint32_t fmt;
     uint32_t width, height;
+    unsigned int plane_count;
+    size_t stride[WO_FB_PLANES];
+    size_t offset[WO_FB_PLANES];
     uint64_t mod;
     wo_rect_t crop;
+
+    struct wl_buffer *way_buf;
 };
 
 wo_surface_t *
-wo_make_surface(wayland_out_env_t * woe)
+wo_make_surface_z(wayland_out_env_t * woe, unsigned int zpos)
 {
     wo_surface_t * wos = calloc(1, sizeof(*wos));
-    if (wos != NULL)
+    if (wos == NULL)
         return NULL;
     wos->woe = woe;
+
+    pthread_mutex_lock(&woe->surface_lock);
+    {
+        wo_surface_t * n = woe->surface_chain;
+        wo_surface_t * p = NULL;
+        while (n != NULL && n->zpos <= zpos) {
+            p = n;
+            n = n->next;
+        }
+        wos->prev = p;
+        wos->next = n;
+        if (p == NULL)
+            woe->surface_chain = wos;
+        else
+            p->next = wos;
+        if (n != NULL)
+            n->prev = wos;
+
+        plane_create(&woe->wc, &wos->s, woe->wc.win_surface,
+                     p == NULL ? woe->wc.vid.surface : p->s.surface, false);
+    }
+    pthread_mutex_unlock(&woe->surface_lock);
     return wos;
+}
+
+static void
+surface_free(wo_surface_t * const wos)
+{
+    wayland_out_env_t * const woe = wos->woe;
+
+    pthread_mutex_lock(&woe->surface_lock);
+    {
+        if (wos->prev == NULL)
+            woe->surface_chain = wos->next;
+        else
+            wos->prev->next = wos->next;
+        if (wos->next != NULL)
+            wos->next->prev = wos->prev;
+    }
+    pthread_mutex_unlock(&woe->surface_lock);
+    plane_destroy(&wos->s);
+    free(wos);
 }
 
 void
 wo_surface_unref(wo_surface_t ** ppWs)
 {
     wo_surface_t * const ws = *ppWs;
+
     if (ws == NULL)
         return;
-    if (atomic_fetch_sub(&ws->ref_count, 1) != 0)
-        return;
-    free(ws);
+    if (atomic_fetch_sub(&ws->ref_count, 1) == 0)
+        surface_free(ws);
+}
+
+wo_surface_t *
+wo_surface_ref(wo_surface_t * const wos)
+{
+    if (wos != NULL)
+        atomic_fetch_add(&wos->ref_count, 1);
+    return wos;
 }
 
 wo_fb_t *
 wo_make_fb(wayland_out_env_t * woe, uint32_t width, uint32_t height, uint32_t fmt, uint64_t mod)
 {
     wo_fb_t * wofb = calloc(1, sizeof(*wofb));
+    struct zwp_linux_buffer_params_v1 *params;
+    unsigned int i;
+
     if (wofb == NULL)
         return NULL;
     wofb->woe = woe;
-    // **** dmabuf env??
     wofb->fmt = fmt;
     wofb->mod = mod;
     wofb->width = width;
     wofb->height = height;
+    wofb->plane_count = 1;
+    wofb->stride[0] = width * 4;  // *** Proper fmt calc would be good!
     wofb->crop = (wo_rect_t){0,0,width,height};
+    if ((wofb->dh = dmabuf_alloc(woe->dbsc, height * wofb->stride[0])) == NULL)
+        goto fail;
+
+    // This should be safe to do in this thread
+    if ((params = zwp_linux_dmabuf_v1_create_params(woe->wc.linux_dmabuf_v1)) == NULL)
+        goto fail;
+
+    for (i = 0; i != wofb->plane_count; ++i) {
+        zwp_linux_buffer_params_v1_add(params, dmabuf_fd(wofb->dh), i,
+                                       wofb->offset[i], wofb->stride[i],
+                                       (unsigned int)(mod >> 32), (unsigned int)(mod & 0xFFFFFFFF));
+    }
+
+    wofb->way_buf = zwp_linux_buffer_params_v1_create_immed(params, width, height, fmt, 0);
+    zwp_linux_buffer_params_v1_destroy(params);
+    if (wofb->way_buf == NULL)
+        goto fail;
+
     return wofb;
+
+fail:
+    wo_fb_unref(&wofb);
+    return NULL;
 }
 
 wo_fb_t *
 wo_fb_ref(wo_fb_t * wfb)
 {
+    if (wfb != NULL)
+        atomic_fetch_add(&wfb->ref_count, 1);
     return wfb;
 }
 
@@ -1749,6 +1843,8 @@ wo_fb_unref(wo_fb_t ** ppwfb)
     if (atomic_fetch_sub(&wfb->ref_count, 1) != 0)
         return;
 
+    buffer_destroy(&wfb->way_buf);
+    dmabuf_unref(&wfb->dh);
     free(wfb);
 }
 
@@ -1767,14 +1863,13 @@ wo_fb_height(const wo_fb_t * wfb)
 unsigned int
 wo_fb_pitch(const wo_fb_t * wfb, const unsigned int plane)
 {
-    // *** pitch;
-    return plane != 0 ? 0 : wfb->width * 4;
+    return plane >= wfb->plane_count ? 0 : wfb->stride[plane];
 }
 
 void *
 wo_fb_data(const wo_fb_t * wfb, const unsigned int plane)
 {
-    return plane != 0 ? NULL : dmabuf_map(wfb->dh);
+    return plane >= wfb->plane_count ? NULL : (void *)((uint8_t*)dmabuf_map(wfb->dh) + wfb->offset[plane]);
 }
 
 void
@@ -1813,20 +1908,69 @@ wo_surface_commit(wo_surface_t * wsurf)
     return 0;
 }
 
-int
-wo_surface_dettach_fb(wo_surface_t * wsurf)
+struct surface_attach_fb_arg_s {
+    wo_surface_t * wos;
+    wo_fb_t * wofb;
+    wo_rect_t dst_pos;
+};
+
+static void
+surface_attach_fb_free(struct surface_attach_fb_arg_s * a)
 {
-    (void)wsurf;
+    wo_surface_unref(&a->wos);
+    wo_fb_unref(&a->wofb);
+    free(a);
+}
+
+static void
+surface_attach_fb_cb(void * v, short revents)
+{
+    struct surface_attach_fb_arg_s * const a = v;
+    (void)revents;
+
+    if (a->wofb == NULL) {
+        wl_surface_attach(a->wos->s.surface, NULL, 0, 0);
+        wl_surface_commit(a->wos->s.surface);
+    }
+    else {
+        wl_surface_attach(a->wos->s.surface, a->wofb->way_buf, 0, 0);
+        wp_viewport_set_source(a->wos->s.viewport,
+                               a->wofb->crop.x >> 8, a->wofb->crop.y >> 8,
+                               a->wofb->crop.w >> 8, a->wofb->crop.h >> 8);
+        wp_viewport_set_destination(a->wos->s.viewport, a->dst_pos.w, a->dst_pos.h);
+        wl_subsurface_set_position(a->wos->s.subsurface, a->dst_pos.x, a->dst_pos.y);
+        wl_surface_commit(a->wos->s.surface);
+        wl_surface_commit(a->wos->woe->wc.win_surface); // Need parent commit for position
+    }
+
+    surface_attach_fb_free(a);
+}
+
+int
+wo_surface_attach_fb(wo_surface_t * wos, wo_fb_t * wofb, const wo_rect_t dst_pos)
+{
+    wayland_out_env_t * const woe = wos->woe;
+    struct surface_attach_fb_arg_s * a = calloc(1, sizeof(*a));
+    int rv;
+
+    if (a == NULL)
+        return -ENOMEM;
+
+    a->wos = wo_surface_ref(wos);
+    a->wofb = wo_fb_ref(wofb);
+    a->dst_pos = dst_pos;
+
+    if ((rv = pollqueue_callback_once(woe->wc.pq, surface_attach_fb_cb, a)) != 0) {
+        surface_attach_fb_free(a);
+        return rv;
+    }
     return 0;
 }
 
 int
-wo_surface_attach_fb(wo_surface_t * wsurf, wo_fb_t * wfb, const wo_rect_t dst_pos)
+wo_surface_dettach_fb(wo_surface_t * wos)
 {
-    (void)wsurf;
-    (void)wfb;
-    (void)dst_pos;
-    return 0;
+    return wo_surface_attach_fb(wos, NULL, (wo_rect_t){0,0,0,0});
 }
 
 
