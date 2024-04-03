@@ -62,11 +62,12 @@ extra_c_args = [
 dep_rt = meson.get_compiler('c').find_library('rt')
 
 subdir('freetype')
+subdir('cube')
 
 executable('hello_wayland',
   wl_sources + protocols_files,
   install : true,
-  link_with : runticker_opt,
+  link_with : runticker_opt + runcube_opt,
   dependencies : [wl_client_dep, wl_protocol_dep, wl_egl_dep, epoxy_dep, libdrm_dep,
     threads_dep,
     dep_rt,

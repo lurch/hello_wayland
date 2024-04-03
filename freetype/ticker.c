@@ -251,7 +251,7 @@ ticker_delete(ticker_env_t **ppTicker)
 
     if (te->dfbs[0])
     {
-        wo_surface_dettach_fb(te->dp);
+        wo_surface_detach_fb(te->dp);
         wo_surface_commit(te->dp);
     }
 

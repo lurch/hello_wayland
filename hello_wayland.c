@@ -49,6 +49,9 @@
 
 #include "init_window.h"
 
+#if HAS_RUNCUBE
+#include <cube/runcube.h>
+#endif
 #if HAS_RUNTICKER
 #include <freetype/runticker.h>
 #endif
@@ -456,6 +459,9 @@ int main(int argc, char *argv[])
 #if HAS_RUNTICKER
     runticker_start(dpo, 100, 500, 800, 100, "Wombats are go!", fontfile);
 #endif
+    {
+        runcube_way_start(dpo, &(wo_rect_t){100,100,400,400});
+    }
 
 loopy:
     in_file = in_filelist[in_n];

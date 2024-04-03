@@ -25,6 +25,8 @@ struct wo_fb_s;
 typedef struct wo_fb_s wo_fb_t;
 
 struct dmabuf_h;
+struct wl_display;
+struct wl_egl_window;
 
 typedef struct wo_rect_s {
     int32_t x, y;
@@ -53,5 +55,17 @@ void wo_fb_read_end(wo_fb_t * wfb);
 
 int wo_surface_commit(wo_surface_t * wsurf);
 
+unsigned int wo_surface_dst_width(const wo_surface_t * const wos);
+unsigned int wo_surface_dst_height(const wo_surface_t * const wos);
+wayland_out_env_t * wo_surface_env(const wo_surface_t * const wos);
+
 int wo_surface_attach_fb(wo_surface_t * wsurf, wo_fb_t * wfb, const wo_rect_t dst_pos);
-int wo_surface_dettach_fb(wo_surface_t * wsurf);
+int wo_surface_detach_fb(wo_surface_t * wsurf);
+// make wl_egl_window from surface
+struct wl_egl_window * wo_surface_egl_window_create(wo_surface_t * wsurf, const wo_rect_t dst_pos);
+
+struct wl_display * wo_env_display(const wayland_out_env_t * const woe);
+wayland_out_env_t * wo_env_ref(wayland_out_env_t * const woe);
+void wo_env_unref(wayland_out_env_t ** const ppWoe);
+
+

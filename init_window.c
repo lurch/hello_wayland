@@ -100,6 +100,8 @@ typedef struct window_ctx_s {
 } window_ctx_t;
 
 typedef struct wayland_out_env_s {
+    atomic_int ref_count;
+
     window_ctx_t wc;
 
     int show_all;
@@ -1689,8 +1691,9 @@ struct wo_surface_s {
 
     wayland_out_env_t * woe;
     unsigned int zpos;
-    wo_rect_t dest_rect;
 
+    wo_rect_t dst_pos;
+    struct wl_egl_window * egl_window;
     subplane_t s;
 };
 
@@ -1711,76 +1714,6 @@ struct wo_fb_s {
 
     struct wl_buffer *way_buf;
 };
-
-wo_surface_t *
-wo_make_surface_z(wayland_out_env_t * woe, unsigned int zpos)
-{
-    wo_surface_t * wos = calloc(1, sizeof(*wos));
-    if (wos == NULL)
-        return NULL;
-    wos->woe = woe;
-
-    pthread_mutex_lock(&woe->surface_lock);
-    {
-        wo_surface_t * n = woe->surface_chain;
-        wo_surface_t * p = NULL;
-        while (n != NULL && n->zpos <= zpos) {
-            p = n;
-            n = n->next;
-        }
-        wos->prev = p;
-        wos->next = n;
-        if (p == NULL)
-            woe->surface_chain = wos;
-        else
-            p->next = wos;
-        if (n != NULL)
-            n->prev = wos;
-
-        plane_create(&woe->wc, &wos->s, woe->wc.win_surface,
-                     p == NULL ? woe->wc.vid.surface : p->s.surface, false);
-    }
-    pthread_mutex_unlock(&woe->surface_lock);
-    return wos;
-}
-
-static void
-surface_free(wo_surface_t * const wos)
-{
-    wayland_out_env_t * const woe = wos->woe;
-
-    pthread_mutex_lock(&woe->surface_lock);
-    {
-        if (wos->prev == NULL)
-            woe->surface_chain = wos->next;
-        else
-            wos->prev->next = wos->next;
-        if (wos->next != NULL)
-            wos->next->prev = wos->prev;
-    }
-    pthread_mutex_unlock(&woe->surface_lock);
-    plane_destroy(&wos->s);
-    free(wos);
-}
-
-void
-wo_surface_unref(wo_surface_t ** ppWs)
-{
-    wo_surface_t * const ws = *ppWs;
-
-    if (ws == NULL)
-        return;
-    if (atomic_fetch_sub(&ws->ref_count, 1) == 0)
-        surface_free(ws);
-}
-
-wo_surface_t *
-wo_surface_ref(wo_surface_t * const wos)
-{
-    if (wos != NULL)
-        atomic_fetch_add(&wos->ref_count, 1);
-    return wos;
-}
 
 wo_fb_t *
 wo_make_fb(wayland_out_env_t * woe, uint32_t width, uint32_t height, uint32_t fmt, uint64_t mod)
@@ -1959,6 +1892,7 @@ wo_surface_attach_fb(wo_surface_t * wos, wo_fb_t * wofb, const wo_rect_t dst_pos
     a->wos = wo_surface_ref(wos);
     a->wofb = wo_fb_ref(wofb);
     a->dst_pos = dst_pos;
+    wos->dst_pos = dst_pos;
 
     if ((rv = pollqueue_callback_once(woe->wc.pq, surface_attach_fb_cb, a)) != 0) {
         surface_attach_fb_free(a);
@@ -1968,9 +1902,130 @@ wo_surface_attach_fb(wo_surface_t * wos, wo_fb_t * wofb, const wo_rect_t dst_pos
 }
 
 int
-wo_surface_dettach_fb(wo_surface_t * wos)
+wo_surface_detach_fb(wo_surface_t * wos)
 {
     return wo_surface_attach_fb(wos, NULL, (wo_rect_t){0,0,0,0});
 }
 
+wo_surface_t *
+wo_make_surface_z(wayland_out_env_t * woe, unsigned int zpos)
+{
+    wo_surface_t * wos = calloc(1, sizeof(*wos));
+    if (wos == NULL)
+        return NULL;
+    wos->woe = woe;
+
+    pthread_mutex_lock(&woe->surface_lock);
+    {
+        wo_surface_t * n = woe->surface_chain;
+        wo_surface_t * p = NULL;
+        while (n != NULL && n->zpos <= zpos) {
+            p = n;
+            n = n->next;
+        }
+        wos->prev = p;
+        wos->next = n;
+        if (p == NULL)
+            woe->surface_chain = wos;
+        else
+            p->next = wos;
+        if (n != NULL)
+            n->prev = wos;
+
+        plane_create(&woe->wc, &wos->s, woe->wc.win_surface,
+                     p == NULL ? woe->wc.vid.surface : p->s.surface, false);
+    }
+    pthread_mutex_unlock(&woe->surface_lock);
+    return wos;
+}
+
+unsigned int
+wo_surface_dst_width(const wo_surface_t * const wos)
+{
+    return wos->dst_pos.w;
+}
+
+unsigned int
+wo_surface_dst_height(const wo_surface_t * const wos)
+{
+    return wos->dst_pos.h;
+}
+
+wayland_out_env_t *
+wo_surface_env(const wo_surface_t * const wos)
+{
+    return wos->woe;
+}
+
+struct wl_egl_window *
+wo_surface_egl_window_create(wo_surface_t * const wos, const wo_rect_t dst_pos)
+{
+    if (wos->egl_window == NULL)
+        wos->egl_window = wl_egl_window_create(wos->s.surface, dst_pos.w, dst_pos.h);
+    wos->dst_pos = dst_pos;
+    return wos->egl_window;
+}
+
+static void
+surface_free(wo_surface_t * const wos)
+{
+    wayland_out_env_t * const woe = wos->woe;
+
+    pthread_mutex_lock(&woe->surface_lock);
+    {
+        if (wos->prev == NULL)
+            woe->surface_chain = wos->next;
+        else
+            wos->prev->next = wos->next;
+        if (wos->next != NULL)
+            wos->next->prev = wos->prev;
+    }
+    pthread_mutex_unlock(&woe->surface_lock);
+    plane_destroy(&wos->s);
+    free(wos);
+}
+
+void
+wo_surface_unref(wo_surface_t ** ppWs)
+{
+    wo_surface_t * const ws = *ppWs;
+
+    if (ws == NULL)
+        return;
+    if (atomic_fetch_sub(&ws->ref_count, 1) == 0)
+        surface_free(ws);
+}
+
+wo_surface_t *
+wo_surface_ref(wo_surface_t * const wos)
+{
+    if (wos != NULL)
+        atomic_fetch_add(&wos->ref_count, 1);
+    return wos;
+}
+
+
+struct wl_display *
+wo_env_display(const wayland_out_env_t * const woe)
+{
+    return woe->wc.w_display;
+}
+
+wayland_out_env_t *
+wo_env_ref(wayland_out_env_t * const woe)
+{
+    if (woe != NULL)
+        atomic_fetch_add(&woe->ref_count, 1);
+    return woe;
+}
+
+void
+wo_env_unref(wayland_out_env_t ** const ppWoe)
+{
+    wayland_out_env_t * const woe = *ppWoe;
+    if (woe == NULL)
+        return;
+    if (atomic_fetch_sub(&woe->ref_count, 1) == 0)
+        egl_wayland_out_delete(woe);
+}
 
