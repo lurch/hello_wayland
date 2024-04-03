@@ -397,7 +397,7 @@ int init_egl(struct egl *egl, struct wl_display * w_display, struct wl_egl_windo
 		EGL_RED_SIZE, 1,
 		EGL_GREEN_SIZE, 1,
 		EGL_BLUE_SIZE, 1,
-		EGL_ALPHA_SIZE, 0,
+		EGL_ALPHA_SIZE, 1,
 		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
 		EGL_SAMPLES, samples,
 		EGL_NONE
