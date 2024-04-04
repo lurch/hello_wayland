@@ -67,5 +67,7 @@ struct wl_egl_window * wo_surface_egl_window_create(wo_surface_t * wsurf, const 
 struct wl_display * wo_env_display(const wayland_out_env_t * const woe);
 wayland_out_env_t * wo_env_ref(wayland_out_env_t * const woe);
 void wo_env_unref(wayland_out_env_t ** const ppWoe);
+// Window size, x,y zero - wayland doesn't admit position
+wo_rect_t wo_env_window_rect(const wayland_out_env_t * const woe);
 
 

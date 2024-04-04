@@ -218,7 +218,7 @@ static void draw_cube_smooth(unsigned i)
 	glDrawArrays(GL_TRIANGLE_STRIP, 20, 4);
 }
 
-const struct egl * init_cube_smooth(struct wl_display * w_display, struct wl_egl_window *w_egl_window, int width, int height, int samples)
+struct egl * init_cube_smooth(struct wl_display * w_display, struct wl_egl_window *w_egl_window, int width, int height, int samples)
 {
 	int ret;
 
@@ -271,3 +271,10 @@ const struct egl * init_cube_smooth(struct wl_display * w_display, struct wl_egl
 
 	return &gl.egl;
 }
+
+void
+destroy_cube_smooth(struct egl * egl)
+{
+	uninit_egl(egl);
+}
+

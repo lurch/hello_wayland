@@ -348,6 +348,12 @@ int main(int argc, char *argv[])
     bool fullscreen = false;
     bool no_wait = false;
     static const char fontfile[] = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf";
+#if HAS_RUNCUBE
+    runcube_env_t * rce = NULL;
+#endif
+#if HAS_RUNTICKER
+    runticker_env_t * rte = NULL;
+#endif
 
     {
         char * const * a = argv + 1;
@@ -457,11 +463,19 @@ int main(int argc, char *argv[])
     }
 
 #if HAS_RUNTICKER
-    runticker_start(dpo, 100, 500, 800, 100, "Wombats are go!", fontfile);
-#endif
     {
-        runcube_way_start(dpo, &(wo_rect_t){100,100,400,400});
+        wo_rect_t r = wo_env_window_rect(dpo);
+        runticker_start(dpo, r.w / 10, r.h * 8 / 10, r.w * 8 / 10, r.h / 10, "Wombats are go!", fontfile);
     }
+#endif
+#if HAS_RUNCUBE
+    {
+        wo_rect_t r = wo_env_window_rect(dpo);
+        unsigned int w = r.w > r.h ? r.h : r.w;
+        runcube_way_start(dpo, &(wo_rect_t){r.w / 10, r.h / 10, w / 2, w / 2});
+        printf("w/h=%dx%d, w=%d\n", r.w, r.h, w);
+    }
+#endif
 
 loopy:
     in_file = in_filelist[in_n];
@@ -627,7 +641,14 @@ retry_hw:
     if (--loop_count > 0)
         goto loopy;
 
-    egl_wayland_out_delete(dpo);
+#if HAS_RUNCUBE
+    runcube_way_stop(&rce);
+#endif
+#if HAS_RUNTICKER
+    runticker_stop(&rte);
+#endif
+
+    wo_env_unref(&dpo);
 
     return 0;
 }

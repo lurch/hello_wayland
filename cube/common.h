@@ -155,6 +155,8 @@ static inline int __egl_check(bool bad, const char *name)
 #define egl_check(egl, name) __egl_check(!(egl)->name, #name)
 
 int init_egl(struct egl *egl, struct wl_display * w_display, struct wl_egl_window * w_egl_window, int samples);
+void uninit_egl(struct egl *egl);
+
 int create_program(const char *vs_src, const char *fs_src);
 int link_program(unsigned program);
 
@@ -167,7 +169,8 @@ enum mode {
 	SHADERTOY,     /* display shadertoy shader */
 };
 
-const struct egl * init_cube_smooth(struct wl_display * w_display, struct wl_egl_window *w_egl_window, int width, int height, int samples);
+struct egl * init_cube_smooth(struct wl_display * w_display, struct wl_egl_window *w_egl_window, int width, int height, int samples);
+void destroy_cube_smooth(struct egl * egl);
 
 #define NSEC_PER_SEC (INT64_C(1000) * USEC_PER_SEC)
 #define USEC_PER_SEC (INT64_C(1000) * MSEC_PER_SEC)

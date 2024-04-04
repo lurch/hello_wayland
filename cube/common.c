@@ -506,6 +506,13 @@ int init_egl(struct egl *egl, struct wl_display * w_display, struct wl_egl_windo
 	return 0;
 }
 
+void uninit_egl(struct egl *egl)
+{
+	eglMakeCurrent(egl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+	eglDestroySurface(egl->display, egl->surface);
+	eglTerminate(egl->display);
+}
+
 int create_program(const char *vs_src, const char *fs_src)
 {
 	GLuint vertex_shader, fragment_shader, program;

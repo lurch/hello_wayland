@@ -1137,10 +1137,14 @@ xdg_toplevel_configure_cb(void *data,
                                       struct wl_array *states)
 {
     window_ctx_t *const wc = data;
+    enum xdg_toplevel_state *p;
     (void)xdg_toplevel;
     (void)states;
 
     LOG("%s: %dx%d\n", __func__, w, h);
+    wl_array_for_each(p, states) {
+        LOG("    State: %d\n", *p);
+    }
 
     // no window geometry event, ignore
     if (w == 0 && h == 0)
@@ -1195,6 +1199,8 @@ static void
 xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial)
 {
     (void)data;
+
+    LOG("%s: Done\n", __func__);
 
     xdg_surface_ack_configure(xdg_surface, serial);
 }
@@ -1283,8 +1289,7 @@ global_registry_handler(void *data, struct wl_registry *registry, uint32_t id,
 
     // Want version 3 as that has _create_immed (ver 2) and modifiers (ver 3)
     // v4 reworks format listing again to be more complex - avoid for now
-    if (!woe->is_egl &&
-        strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
+    if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
         wc->linux_dmabuf_v1 = wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, 3);
         zwp_linux_dmabuf_v1_add_listener(wc->linux_dmabuf_v1, &linux_dmabuf_v1_listener, wc);
     }
@@ -1645,13 +1650,15 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
     wc->window_height = wc->req_h;
 
     plane_create(wc, &wc->vid, wc->win_surface, wc->win_surface, false);
+    wl_surface_attach(wc->win_surface, wc->win_buffer, 0, 0);
+    wp_viewport_set_destination(wc->win_viewport, wc->window_width, wc->window_height);
 
     wl_surface_commit(wc->win_surface);
+    wl_display_roundtrip(wc->w_display);
+    LOG("%s: %dx%d\n", __func__, wc->req_w, wc->req_h);
 
     wc->pq = pollqueue_new();
     pollqueue_set_pre_post(wc->pq, pollq_pre_cb, pollq_post_cb, wc);
-
-    LOG("<<< %s\n", __func__);
 
     // Some egl setup must be done on display thread
     if (woe->is_egl) {
@@ -1662,6 +1669,9 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
             goto fail;
         }
     }
+    usleep(1000000);
+
+    LOG(">>> %s\n", __func__);
 
     return woe;
 
@@ -1981,6 +1991,8 @@ surface_free(wo_surface_t * const wos)
             wos->next->prev = wos->prev;
     }
     pthread_mutex_unlock(&woe->surface_lock);
+    if (wos->egl_window)
+        wl_egl_window_destroy(wos->egl_window);
     plane_destroy(&wos->s);
     free(wos);
 }
@@ -2027,5 +2039,11 @@ wo_env_unref(wayland_out_env_t ** const ppWoe)
         return;
     if (atomic_fetch_sub(&woe->ref_count, 1) == 0)
         egl_wayland_out_delete(woe);
+}
+
+wo_rect_t
+wo_env_window_rect(const wayland_out_env_t * const woe)
+{
+    return (wo_rect_t){0, 0, woe->wc.req_w, woe->wc.req_h};
 }
 

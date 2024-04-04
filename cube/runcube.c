@@ -31,7 +31,7 @@ static void *
 cube_thread(void * v)
 {
     runcube_env_t * const rce = v;
-    const struct egl *egl;
+    struct egl *egl;
     wo_surface_t * wsurf = wo_make_surface_z(rce->woe, 30);
 
     egl = init_cube_smooth(wo_env_display(rce->woe), wo_surface_egl_window_create(wsurf, rce->pos), rce->pos.w, rce->pos.h, 0);
@@ -40,7 +40,8 @@ cube_thread(void * v)
         cube_run(rce, egl);
     }
 
-    // ***** Should have cleanup here but cube demo doesn't bother
+    destroy_cube_smooth(egl);
+    wo_surface_unref(&wsurf);
 
     return NULL;
 }
