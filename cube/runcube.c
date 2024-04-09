@@ -79,6 +79,7 @@ runcube_way_stop(runcube_env_t ** const ppRce)
         atomic_store(&rce->kill, 1);
         pthread_join(rce->thread_id, NULL);
     }
+    wo_env_unref(&rce->woe);
 
     free(rce);
 }

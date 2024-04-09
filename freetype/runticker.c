@@ -17,6 +17,7 @@
 
 struct runticker_env_s {
     atomic_int kill;
+    wayland_out_env_t * const woe;
     ticker_env_t *te;
     char *text;
     const char *cchar;
@@ -69,6 +70,7 @@ runticker_start(wayland_out_env_t * const dout,
     dfte->prod_fd = -1;
     dfte->text  = strdup(text);
     dfte->cchar = dfte->text;
+    dfte->woe = wo_env_ref(dout);
 
     if ((dfte->te = ticker_new(dout, x, y, w, h)) == NULL) {
         fprintf(stderr, "Failed to create ticker\n");
@@ -123,6 +125,7 @@ runticker_stop(runticker_env_t ** const ppDfte)
     ticker_delete(&dfte->te);
     if (dfte->prod_fd != -1)
         close(dfte->prod_fd);
+    wo_env_unref(&dfte->woe);
     free(dfte->text);
     free(dfte);
 }
