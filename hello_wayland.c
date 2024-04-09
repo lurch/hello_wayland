@@ -49,13 +49,6 @@
 
 #include "init_window.h"
 
-#if HAS_RUNCUBE
-#include <cube/runcube.h>
-#endif
-#if HAS_RUNTICKER
-#include <freetype/runticker.h>
-#endif
-
 static enum AVPixelFormat hw_pix_fmt;
 static FILE *output_file = NULL;
 static long frames = 0;
@@ -98,7 +91,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 }
 
 static int decode_write(AVCodecContext * const avctx,
-                        wayland_out_env_t * const dpo,
+                        vid_out_env_t * const dpo,
                         AVPacket *packet)
 {
     AVFrame *frame = NULL, *sw_frame = NULL;
@@ -337,7 +330,7 @@ int main(int argc, char *argv[])
     unsigned int in_n = 0;
     const char * hwdev = "drm";
     int i;
-    wayland_out_env_t * dpo;
+    vid_out_env_t * dpo;
     long loop_count = 1;
     long frame_count = -1;
     const char * out_name = NULL;
@@ -347,13 +340,6 @@ int main(int argc, char *argv[])
     bool use_dmabuf = false;
     bool fullscreen = false;
     bool no_wait = false;
-    static const char fontfile[] = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf";
-#if HAS_RUNCUBE
-    runcube_env_t * rce = NULL;
-#endif
-#if HAS_RUNTICKER
-    runticker_env_t * rte = NULL;
-#endif
 
     {
         char * const * a = argv + 1;
@@ -463,18 +449,10 @@ int main(int argc, char *argv[])
     }
 
 #if HAS_RUNTICKER
-    {
-        wo_rect_t r = wo_env_window_rect(dpo);
-        runticker_start(dpo, r.w / 10, r.h * 8 / 10, r.w * 8 / 10, r.h / 10, "Wombats are go!", fontfile);
-    }
+    egl_wayland_out_runticker(dpo);
 #endif
 #if HAS_RUNCUBE
-    {
-        wo_rect_t r = wo_env_window_rect(dpo);
-        unsigned int w = r.w > r.h ? r.h : r.w;
-        runcube_way_start(dpo, &(wo_rect_t){r.w / 10, r.h / 10, w / 2, w / 2});
-        printf("w/h=%dx%d, w=%d\n", r.w, r.h, w);
-    }
+    egl_wayland_out_runcube(dpo);
 #endif
 
 loopy:
@@ -641,14 +619,6 @@ retry_hw:
     if (--loop_count > 0)
         goto loopy;
 
-#if HAS_RUNCUBE
-    runcube_way_stop(&rce);
-#endif
-#if HAS_RUNTICKER
-    runticker_stop(&rte);
-#endif
-
-    wo_env_unref(&dpo);
-
+    egl_wayland_out_delete(dpo);
     return 0;
 }

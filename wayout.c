@@ -248,6 +248,8 @@ struct wo_fb_s {
     void * on_delete_v;
     wo_fb_on_delete_fn pre_delete_fn;
     void * pre_delete_v;
+    wo_fb_on_release_fn on_release_fn;
+    void * on_release_v;
 };
 
 struct wo_window_s {
@@ -334,7 +336,7 @@ fail:
 }
 
 wo_fb_t *
-wo_fb_new_dh(wo_env_t * const woe, const w, const h, uint32_t fmt, uint64_t mod,
+wo_fb_new_dh(wo_env_t * const woe, const uint32_t w, const uint32_t h, uint32_t fmt, uint64_t mod,
              unsigned int objs, struct dmabuf_h ** dhs,
              unsigned int planes, const size_t * offsets, const size_t * strides, const unsigned int * obj_nos)
 {
@@ -459,6 +461,65 @@ wo_fb_pre_delete_unset(wo_fb_t * const wofb)
 {
     wofb->pre_delete_fn = (wo_fb_pre_delete_fn)0;
     wofb->pre_delete_v = NULL;
+}
+
+struct fb_fence_wait_s {
+    wo_fb_t * wofb;
+    struct polltask * pt;
+};
+
+static void
+fb_release_fence2_fb(void * v, short revents)
+{
+    struct fb_fence_s * ffs = v;
+    wo_fb_t *wofb = ffs->wofb;
+    polltask_delete(&ffs->wofb);
+    free(ffs);
+    if (wofb->on_delete_fn)
+        wofb->on_release_fn(wofb->on_release_v, wofb);
+}
+
+static void
+fb_release_fence_cb(void *data, struct wl_buffer *wl_buffer)
+{
+    wo_fb_t * const wofb = data;
+    (void)wl_buffer;
+    struct fb_fence_s * ffs = malloc(sizeof(*ffs));
+
+    ffs->pt = polltask_new(wofb->woe->pq, dmabuf_fd(wofb->dh[0]), fb_release_fence2_cb, ffs);
+    pollqueue_add_task(ffs->pt, 1000);
+}
+
+static void
+fb_release_no_fence_cb(void *data, struct wl_buffer *wl_buffer)
+{
+    wo_fb_t * const wofb = data;
+    (void)wl_buffer;
+    if (wofb->on_delete_fn)
+        wofb->on_release_fn(wofb->on_release_v, wofb);
+}
+
+void
+wo_fb_on_release_set(wo_fb_t * const wofb, bool wait_for_fence, wo_fb_on_release_fn const fn, void * const v)
+{
+    static const struct wl_buffer_listener no_fence_listener = {
+        .release = fb_release_no_fence_cb
+    };
+    static const struct wl_buffer_listener fence_listener = {
+        .release = fb_release_fence_cb
+    };
+
+    wofb->on_release_fn = fn;
+    wofb->on_release_v = v;
+
+    wl_buffer_add_listener(wofb->way_buf, wait_for_fence ? &fence_listener : &no_fence_listener, wofb);
+}
+
+void
+wo_fb_on_release_unset(wo_fb_t * const wofb)
+{
+    wofb->on_release_fn = (wo_fb_on_release_fn)0;
+    wofb->on_release_v = NULL;
 }
 
 unsigned int
@@ -649,6 +710,13 @@ wo_make_surface_z(wo_window_t * wowin, const wo_surface_fns_t * fns, unsigned in
     }
     pthread_mutex_unlock(&wowin->surface_lock);
     return wos;
+}
+
+int
+wo_surface_dst_pos_set(wo_surface_t * const wos, const wo_rect_t pos)
+{
+    printf(stderr, "*** %s: NIF\n", __func__);
+    return -1;
 }
 
 unsigned int
@@ -1098,7 +1166,13 @@ pollq_post_cb(void *v, short revents)
 struct wl_display *
 wo_env_display(const wo_env_t * const woe)
 {
-    return woe->wc.w_display;
+    return woe->w_display;
+}
+
+struct pollqueue *
+wo_env_pollqueue(const wo_env_t * const woe)
+{
+    return woe->pq;
 }
 
 wo_env_t *
@@ -1107,12 +1181,6 @@ wo_env_ref(wo_env_t * const woe)
     if (woe != NULL)
         atomic_fetch_add(&woe->ref_count, 1);
     return woe;
-}
-
-wo_rect_t
-wo_env_window_rect(const wo_env_t * const woe)
-{
-    return (wo_rect_t){0, 0, woe->wc.req_w, woe->wc.req_h};
 }
 
 

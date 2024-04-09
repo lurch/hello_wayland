@@ -11,13 +11,13 @@
 
 #include <sys/eventfd.h>
 
-#include <init_window.h>
+#include <wayout.h>
 
 #include "ticker.h"
 
 struct runticker_env_s {
     atomic_int kill;
-    wayland_out_env_t * const woe;
+    wo_window_t * wowin;
     ticker_env_t *te;
     char *text;
     const char *cchar;
@@ -57,7 +57,7 @@ runticker_thread(void * v)
 }
 
 runticker_env_t *
-runticker_start(wayland_out_env_t * const dout,
+runticker_start(wo_window_t * const wowin,
                 unsigned int x, unsigned int y, unsigned int w, unsigned int h,
                 const char * const text,
                 const char * const fontfile)
@@ -70,9 +70,9 @@ runticker_start(wayland_out_env_t * const dout,
     dfte->prod_fd = -1;
     dfte->text  = strdup(text);
     dfte->cchar = dfte->text;
-    dfte->woe = wo_env_ref(dout);
+    dfte->wowin = wo_window_ref(wowin);
 
-    if ((dfte->te = ticker_new(dout, x, y, w, h)) == NULL) {
+    if ((dfte->te = ticker_new(wowin, x, y, w, h)) == NULL) {
         fprintf(stderr, "Failed to create ticker\n");
         goto fail;
     }
@@ -125,7 +125,7 @@ runticker_stop(runticker_env_t ** const ppDfte)
     ticker_delete(&dfte->te);
     if (dfte->prod_fd != -1)
         close(dfte->prod_fd);
-    wo_env_unref(&dfte->woe);
+    wo_window_unref(&dfte->wowin);
     free(dfte->text);
     free(dfte);
 }

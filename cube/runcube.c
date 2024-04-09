@@ -8,11 +8,11 @@
 #include <unistd.h>
 
 #include "common.h"
-#include <init_window.h>
+#include <wayout.h>
 
 struct runcube_env_s {
     atomic_int kill;
-    wayland_out_env_t * woe;
+    wo_window_t * wowin;
     wo_rect_t pos;
     unsigned int run_no;
     bool thread_ok;
@@ -32,9 +32,10 @@ cube_thread(void * v)
 {
     runcube_env_t * const rce = v;
     struct egl *egl;
-    wo_surface_t * wsurf = wo_make_surface_z(rce->woe, 30);
+    wo_surface_t * wsurf = wo_make_surface_z(rce->wowin, NULL, 30);
 
-    egl = init_cube_smooth(wo_env_display(rce->woe), wo_surface_egl_window_create(wsurf, rce->pos), rce->pos.w, rce->pos.h, 0);
+    egl = init_cube_smooth(wo_env_display(wo_window_env(rce->wowin)),
+                           wo_surface_egl_window_create(wsurf, rce->pos), rce->pos.w, rce->pos.h, 0);
 
     while (!atomic_load(&rce->kill)) {
         cube_run(rce, egl);
@@ -47,14 +48,14 @@ cube_thread(void * v)
 }
 
 runcube_env_t *
-runcube_way_start(wayland_out_env_t * const woe, const wo_rect_t * pos)
+runcube_way_start(wo_window_t * const wowin, const wo_rect_t * pos)
 {
     runcube_env_t * rce = calloc(1, sizeof(*rce));
 
     if (rce == NULL)
         return NULL;
 
-    rce->woe = wo_env_ref(woe);
+    rce->wowin = wo_window_ref(wowin);
     rce->pos = *pos;
     if (pthread_create(&rce->thread_id, NULL, cube_thread, rce) != 0)
         goto fail;
@@ -79,7 +80,7 @@ runcube_way_stop(runcube_env_t ** const ppRce)
         atomic_store(&rce->kill, 1);
         pthread_join(rce->thread_id, NULL);
     }
-    wo_env_unref(&rce->woe);
+    wo_window_unref(&rce->wowin);
 
     free(rce);
 }

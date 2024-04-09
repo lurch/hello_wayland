@@ -15,7 +15,7 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
-#include <init_window.h>
+#include <wayout.h>
 
 #include <drm_fourcc.h>
 
@@ -28,7 +28,7 @@ enum ticker_state_e {
 struct ticker_env_s {
     enum ticker_state_e state;
 
-    wayland_out_env_t *woe;
+    wo_window_t *wowin;
     wo_surface_t *dp;
     wo_fb_t *dfbs[2];
 
@@ -268,9 +268,10 @@ ticker_delete(ticker_env_t **ppTicker)
 int
 ticker_init(ticker_env_t *const te)
 {
+    wo_env_t * const woe = wo_window_env(te->wowin);
     for (unsigned int i = 0; i != 2; ++i)
     {
-        te->dfbs[i] = wo_make_fb(te->woe, te->target_width, te->pos.h, te->format, te->modifier);
+        te->dfbs[i] = wo_make_fb(woe, te->target_width, te->pos.h, te->format, te->modifier);
         if (te->dfbs[i] == NULL)
         {
             fprintf(stderr, "Failed to get frame buffer");
@@ -329,14 +330,14 @@ ticker_set_shl(ticker_env_t *const te, unsigned int shift_pels)
 }
 
 ticker_env_t*
-ticker_new(wayland_out_env_t *woe, unsigned int x, unsigned int y, unsigned int w, unsigned int h)
+ticker_new(struct wo_window_s * wowin, unsigned int x, unsigned int y, unsigned int w, unsigned int h)
 {
     ticker_env_t *te = calloc(1, sizeof(*te));
 
     if (te == NULL)
         return NULL;
 
-    te->woe = woe;
+    te->wowin = wowin;
 
     te->pos = (wo_rect_t) { x, y, w, h };
     te->format = DRM_FORMAT_ARGB8888;
@@ -350,7 +351,7 @@ ticker_new(wayland_out_env_t *woe, unsigned int x, unsigned int y, unsigned int 
     }
 
     // This doesn't really want to be the primary
-    if ((te->dp = wo_make_surface_z(te->woe, 16)) == NULL)
+    if ((te->dp = wo_make_surface_z(te->wowin, NULL, 16)) == NULL)
     {
         fprintf(stderr, "Failed to find output plane");
         goto fail;

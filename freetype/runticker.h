@@ -8,9 +8,9 @@ extern "C" {
 struct runticker_env_s;
 typedef struct runticker_env_s runticker_env_t;
 
-struct wayland_out_env_s;
+struct wo_window_s;
 
-runticker_env_t * runticker_start(struct wayland_out_env_s * const woe,
+runticker_env_t * runticker_start(struct wo_window_s * const woe,
                                   unsigned int x, unsigned int y, unsigned int w, unsigned int h,
                                   const char * const text,
                                   const char * const fontfile);
