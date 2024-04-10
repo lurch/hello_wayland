@@ -2,6 +2,7 @@
 #define _WAYOUT_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -88,6 +89,7 @@ wo_env_t * wo_window_env(const wo_window_t * wowin);
 struct wl_display * wo_env_display(const wo_env_t * const woe);
 struct pollqueue * wo_env_pollqueue(const wo_env_t * const woe);
 
+int wo_env_sync(wo_env_t * const woe);
 wo_env_t * wo_env_ref(wo_env_t * const woe);
 void wo_env_unref(wo_env_t ** const ppWoe);
 wo_env_t * wo_env_new_default(void);

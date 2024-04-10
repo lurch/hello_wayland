@@ -1,6 +1,7 @@
 #include "wayout.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -26,6 +27,7 @@
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
 
+#define LOG printf
 
 typedef struct fmt_ent_s {
     uint32_t fmt;
@@ -43,6 +45,90 @@ typedef struct subplane_s {
     struct wl_subsurface * subsurface;
     struct wp_viewport * viewport;
 } subplane_t;
+
+struct wo_surface_s {
+    atomic_int ref_count;
+    struct wo_surface_s * next;
+    struct wo_surface_s * prev;
+
+    wo_env_t * woe;
+    wo_window_t * wowin;
+    wo_surface_t * parent;  // No ref - just a pointer (currently)
+    unsigned int zpos;
+
+    wo_rect_t dst_pos;
+    wo_surface_fns_t fns;
+    struct wl_egl_window * egl_window;
+    subplane_t s;
+};
+
+#define WO_FB_PLANES 4
+
+struct wo_fb_s {
+    atomic_int ref_count;
+
+    wo_env_t * woe;
+    unsigned int obj_count;
+    struct dmabuf_h * dh[WO_FB_PLANES];
+    uint32_t fmt;
+    uint32_t width, height;
+    unsigned int plane_count;
+    size_t stride[WO_FB_PLANES];
+    size_t offset[WO_FB_PLANES];
+    size_t obj_no[WO_FB_PLANES];
+    uint64_t mod;
+    wo_rect_t crop;
+
+    struct wl_buffer *way_buf;
+
+    wo_fb_on_delete_fn on_delete_fn;
+    void * on_delete_v;
+    wo_fb_pre_delete_fn pre_delete_fn;
+    void * pre_delete_v;
+    wo_fb_on_release_fn on_release_fn;
+    void * on_release_v;
+};
+
+struct wo_window_s {
+    atomic_int ref_count;
+    wo_env_t * woe;
+
+    unsigned int req_w;
+    unsigned int req_h;
+
+    wo_rect_t pos;
+    bool fullscreen;
+    const char * title;
+    wo_surface_t * wos;
+    struct xdg_surface *wm_surface;
+    struct xdg_toplevel *wm_toplevel;
+
+    pthread_mutex_t surface_lock;
+    struct wo_surface_s * surface_chain;
+};
+
+struct wo_env_s {
+    atomic_int ref_count;
+
+    struct wl_display *w_display;
+
+    struct pollqueue *pq;
+    struct dmabufs_ctl *dbsc;
+
+    // Bound wayland extensions
+    struct wl_compositor *compositor;
+    struct wl_subcompositor *subcompositor;
+    struct zwp_linux_dmabuf_v1 *linux_dmabuf_v1;
+    struct zxdg_decoration_manager_v1 *decoration_manager;
+    struct wp_viewporter *viewporter;
+    struct xdg_wm_base *wm_base;
+    struct wp_single_pixel_buffer_manager_v1 * single_pixel_manager;
+
+    // Dmabuf fmts
+    fmt_list_t fmt_list;
+
+    struct wl_region * region_all;
+};
 
 // ---------------------------------------------------------------------------
 //
@@ -84,6 +170,7 @@ fmt_list_sort(fmt_list_t *const fl)
     qsort(fl->fmts, fl->len, sizeof(*fl->fmts), fmt_sort_cb);
 }
 
+#if 0
 static bool
 fmt_list_find(const fmt_list_t *const fl, const uint32_t fmt, const uint64_t mod)
 {
@@ -100,6 +187,7 @@ fmt_list_find(const fmt_list_t *const fl, const uint32_t fmt, const uint64_t mod
         return fe != NULL;
     }
 }
+#endif
 
 static void
 fmt_list_uninit(fmt_list_t *const fl)
@@ -208,90 +296,6 @@ fail:
 }
 
 // ===========================================================================
-
-struct wo_surface_s {
-    atomic_int ref_count;
-    struct wo_surface_s * next;
-    struct wo_surface_s * prev;
-
-    wo_env_t * woe;
-    wo_window_t * wowin;
-    wo_surface_t * parent;  // No ref - just a pointer (currently)
-    unsigned int zpos;
-
-    wo_rect_t dst_pos;
-    wo_surface_fns_t * fns;
-    struct wl_egl_window * egl_window;
-    subplane_t s;
-};
-
-#define WO_FB_PLANES 4
-
-struct wo_fb_s {
-    atomic_int ref_count;
-
-    wo_env_t * woe;
-    unsigned int obj_count;
-    struct dmabuf_h * dh[WO_FB_PLANES];
-    uint32_t fmt;
-    uint32_t width, height;
-    unsigned int plane_count;
-    size_t stride[WO_FB_PLANES];
-    size_t offset[WO_FB_PLANES];
-    size_t obj_no[WO_FB_PLANES];
-    uint64_t mod;
-    wo_rect_t crop;
-
-    struct wl_buffer *way_buf;
-
-    wo_fb_on_delete_fn on_delete_fn;
-    void * on_delete_v;
-    wo_fb_on_delete_fn pre_delete_fn;
-    void * pre_delete_v;
-    wo_fb_on_release_fn on_release_fn;
-    void * on_release_v;
-};
-
-struct wo_window_s {
-    atomic_int ref_count;
-    wo_env_t * woe;
-
-    unsigned int req_w;
-    unsigned int req_h;
-
-    wo_rect pos;
-    bool fullscreen;
-    const char * title;
-    wo_surface_t * wos;
-    struct xdg_surface *wm_surface;
-    struct xdg_toplevel *wm_toplevel;
-
-    pthread_mutex_t surface_lock;
-    struct wo_surface_s * surface_chain;
-};
-
-struct wo_env_s {
-    atomic_int ref_count;
-
-    struct wl_display *w_display;
-
-    struct pollqueue *pq;
-
-    // Bound wayland extensions
-    struct wl_compositor *compositor;
-    struct wl_subcompositor *subcompositor;
-    struct zwp_linux_dmabuf_v1 *linux_dmabuf_v1;
-    struct zxdg_decoration_manager_v1 *decoration_manager;
-    struct wp_viewporter *viewporter;
-    struct xdg_wm_base *wm_base;
-    struct wp_single_pixel_buffer_manager_v1 * single_pixel_manager;
-
-    // Dmabuf fmts
-    fmt_list_t fmt_list;
-
-    struct wl_region * region_all;
-};
-
 wo_fb_t *
 wo_make_fb(wo_env_t * woe, uint32_t width, uint32_t height, uint32_t fmt, uint64_t mod)
 {
@@ -314,7 +318,7 @@ wo_make_fb(wo_env_t * woe, uint32_t width, uint32_t height, uint32_t fmt, uint64
     wofb->obj_count = 1;
 
     // This should be safe to do in this thread
-    if ((params = zwp_linux_dmabuf_v1_create_params(woe->wc.linux_dmabuf_v1)) == NULL)
+    if ((params = zwp_linux_dmabuf_v1_create_params(woe->linux_dmabuf_v1)) == NULL)
         goto fail;
 
     for (i = 0; i != wofb->plane_count; ++i) {
@@ -343,7 +347,6 @@ wo_fb_new_dh(wo_env_t * const woe, const uint32_t w, const uint32_t h, uint32_t 
     struct zwp_linux_buffer_params_v1 *params;
     wo_fb_t * wofb = calloc(1, sizeof(*wofb));
     unsigned int i;
-    unsigned int n;
 
     if (wofb == NULL)
         return NULL;
@@ -360,10 +363,8 @@ wo_fb_new_dh(wo_env_t * const woe, const uint32_t w, const uint32_t h, uint32_t 
     params = zwp_linux_dmabuf_v1_create_params(woe->linux_dmabuf_v1);
 
     for (i = 0; i < planes; ++i) {
-        struct dmabuf_h * dh = ;
-
         wofb->offset[i] = offsets[i];
-        wofb->strides[i] = strides[i];
+        wofb->stride[i] = strides[i];
         wofb->obj_no[i] = obj_nos[i];
 
         zwp_linux_buffer_params_v1_add(params, dmabuf_fd(dhs[obj_nos[i]]),
@@ -372,7 +373,7 @@ wo_fb_new_dh(wo_env_t * const woe, const uint32_t w, const uint32_t h, uint32_t 
                                        (unsigned int)(mod & 0xFFFFFFFF));
     }
 
-    wofb->way_buf = zwp_linux_buffer_params_v1_create_immed(params, width, height, format, flags);
+    wofb->way_buf = zwp_linux_buffer_params_v1_create_immed(params, w, h, fmt, 0);
     zwp_linux_buffer_params_v1_destroy(params);
 
     if (wofb->way_buf == NULL)
@@ -380,7 +381,7 @@ wo_fb_new_dh(wo_env_t * const woe, const uint32_t w, const uint32_t h, uint32_t 
     return wofb;
 
 fail:
-    wofb_unref(&wofb);
+    wo_fb_unref(&wofb);
     return NULL;
 }
 
@@ -396,7 +397,7 @@ wo_fb_new_rgba_pixel(wo_env_t * const woe, const uint32_t r, const uint32_t g, c
     wofb->height = 1;
     wofb->plane_count = 1;
     wofb->way_buf = wp_single_pixel_buffer_manager_v1_create_u32_rgba_buffer(
-        woe->single_pixel_manager, 0, 0, 0, UINT32_MAX);
+        woe->single_pixel_manager, r, g, b, a);
     if (wofb->way_buf == NULL)
         goto fail;
 
@@ -418,24 +419,24 @@ wo_fb_ref(wo_fb_t * wfb)
 void
 wo_fb_unref(wo_fb_t ** ppwfb)
 {
-    wo_fb_t * wfb = *ppwfb;
+    wo_fb_t * wofb = *ppwfb;
     unsigned int i;
 
-    if (wfb == NULL)
+    if (wofb == NULL)
         return;
 
-    if (atomic_fetch_sub(&wfb->ref_count, 1) != 0)
+    if (atomic_fetch_sub(&wofb->ref_count, 1) != 0)
         return;
 
-    if (!wofb->pre_delete_fn || !wofb->pre_delete_fn(wofb->pre_delete_v))
+    if (!wofb->pre_delete_fn || !wofb->pre_delete_fn(wofb->pre_delete_v, wofb))
     {
         const wo_fb_on_delete_fn on_delete_fn = wofb->on_delete_fn;
         void * const on_delete_v = wofb->on_delete_v;
 
-        buffer_destroy(&wfb->way_buf);
-        for (i = 0; i != WO_FB_PLANES, ++i)
-            dmabuf_unref(wfb->dh + i);
-        free(wfb);
+        buffer_destroy(&wofb->way_buf);
+        for (i = 0; i != WO_FB_PLANES; ++i)
+            dmabuf_unref(wofb->dh + i);
+        free(wofb);
 
         if (on_delete_fn)
             on_delete_fn(on_delete_v);
@@ -469,11 +470,13 @@ struct fb_fence_wait_s {
 };
 
 static void
-fb_release_fence2_fb(void * v, short revents)
+fb_release_fence2_cb(void * v, short revents)
 {
-    struct fb_fence_s * ffs = v;
+    struct fb_fence_wait_s * ffs = v;
+    (void)revents;
+
     wo_fb_t *wofb = ffs->wofb;
-    polltask_delete(&ffs->wofb);
+    polltask_delete(&ffs->pt);
     free(ffs);
     if (wofb->on_delete_fn)
         wofb->on_release_fn(wofb->on_release_v, wofb);
@@ -484,9 +487,9 @@ fb_release_fence_cb(void *data, struct wl_buffer *wl_buffer)
 {
     wo_fb_t * const wofb = data;
     (void)wl_buffer;
-    struct fb_fence_s * ffs = malloc(sizeof(*ffs));
+    struct fb_fence_wait_s * ffs = malloc(sizeof(*ffs));
 
-    ffs->pt = polltask_new(wofb->woe->pq, dmabuf_fd(wofb->dh[0]), fb_release_fence2_cb, ffs);
+    ffs->pt = polltask_new(wofb->woe->pq, dmabuf_fd(wofb->dh[0]), POLLOUT, fb_release_fence2_cb, ffs);
     pollqueue_add_task(ffs->pt, 1000);
 }
 
@@ -622,9 +625,9 @@ surface_attach_fb_cb(void * v, short revents)
             wp_viewport_set_source(wos->s.viewport,
                                    wofb->crop.x >> 8, wofb->crop.y >> 8,
                                    wofb->crop.w >> 8, wofb->crop.h >> 8);
-        wp_viewport_set_destination(wos->s.viewport, dst_pos.w, dst_pos.h);
+        wp_viewport_set_destination(wos->s.viewport, a->dst_pos.w, a->dst_pos.h);
         if (wos->s.subsurface)
-            wl_subsurface_set_position(wos->s.subsurface, dst_pos.x, dst_pos.y);
+            wl_subsurface_set_position(wos->s.subsurface, a->dst_pos.x, a->dst_pos.y);
         wl_surface_commit(wos->s.surface);
         if (wos->parent != NULL)
             wl_surface_commit(wos->parent->s.surface); // Need parent commit for position
@@ -648,7 +651,7 @@ wo_surface_attach_fb(wo_surface_t * wos, wo_fb_t * wofb, const wo_rect_t dst_pos
     a->dst_pos = dst_pos;
     wos->dst_pos = dst_pos;
 
-    if ((rv = pollqueue_callback_once(woe->wc.pq, surface_attach_fb_cb, a)) != 0) {
+    if ((rv = pollqueue_callback_once(woe->pq, surface_attach_fb_cb, a)) != 0) {
         surface_attach_fb_free(a);
         return rv;
     }
@@ -677,7 +680,7 @@ wo_make_surface_z(wo_window_t * wowin, const wo_surface_fns_t * fns, unsigned in
 
     static const wo_surface_fns_t default_surf_fns = {
         surface_window_resize_default_cb,
-    }
+    };
 
     if (wos == NULL)
         return NULL;
@@ -688,7 +691,7 @@ wo_make_surface_z(wo_window_t * wowin, const wo_surface_fns_t * fns, unsigned in
     pthread_mutex_lock(&wowin->surface_lock);
     {
         wo_surface_t * const win_surface = wowin->surface_chain;
-        wo_surface_t * n = win_surface,
+        wo_surface_t * n = win_surface;
         wo_surface_t * p = NULL;
         while (n != NULL && n->zpos <= zpos) {
             p = n;
@@ -702,7 +705,7 @@ wo_make_surface_z(wo_window_t * wowin, const wo_surface_fns_t * fns, unsigned in
             p->next = wos;
         if (n != NULL)
             n->prev = wos;
-        plane_create(woe, &wos->s,
+        plane_create(wos->woe, &wos->s,
                      win_surface->s.surface,  // Parent - all based off window surface
                      p == NULL ? win_surface->s.surface : p->s.surface, // Above from Z
                      false);
@@ -715,7 +718,10 @@ wo_make_surface_z(wo_window_t * wowin, const wo_surface_fns_t * fns, unsigned in
 int
 wo_surface_dst_pos_set(wo_surface_t * const wos, const wo_rect_t pos)
 {
-    printf(stderr, "*** %s: NIF\n", __func__);
+    (void)wos;
+    (void)pos;
+
+    fprintf(stderr, "*** %s: NIF\n", __func__);
     return -1;
 }
 
@@ -749,18 +755,17 @@ wo_surface_egl_window_create(wo_surface_t * const wos, const wo_rect_t dst_pos)
 static void
 surface_free(wo_surface_t * const wos)
 {
-    wo_env_t * const woe = wos->woe;
-
-    pthread_mutex_lock(&woe->surface_lock);
+    wo_window_t *const wowin = wos->wowin;
+    pthread_mutex_lock(&wowin->surface_lock);
     {
         if (wos->prev == NULL)
-            woe->surface_chain = wos->next;
+            wowin->surface_chain = wos->next;
         else
             wos->prev->next = wos->next;
         if (wos->next != NULL)
             wos->next->prev = wos->prev;
     }
-    pthread_mutex_unlock(&woe->surface_lock);
+    pthread_mutex_unlock(&wowin->surface_lock);
     if (wos->egl_window)
         wl_egl_window_destroy(wos->egl_window);
     plane_destroy(&wos->s);
@@ -909,16 +914,16 @@ window_new_pq(void * v, short revents)
     wo_env_t * const woe = wowin->woe;
     (void)revents;
 
-    wowin->wm_surface = xdg_wm_base_get_xdg_surface(woe->wm_base, wc->win_surface);
+    wowin->wm_surface = xdg_wm_base_get_xdg_surface(woe->wm_base, wowin->wos->s.surface);
     xdg_surface_add_listener(wowin->wm_surface, &xdg_surface_listener, wowin);
 
-    wowin->wm_toplevel = xdg_surface_get_toplevel(woe->wm_surface);
+    wowin->wm_toplevel = xdg_surface_get_toplevel(wowin->wm_surface);
     xdg_toplevel_add_listener(wowin->wm_toplevel, &xdg_toplevel_listener, wowin);
 
     xdg_toplevel_set_title(wowin->wm_toplevel, wowin->title);
 
     if (wowin->fullscreen)
-        xdg_toplevel_set_fullscreen(wc->wm_toplevel, NULL);
+        xdg_toplevel_set_fullscreen(wowin->wm_toplevel, NULL);
 
     if (!woe->decoration_manager) {
         LOG("No decoration manager\n");
@@ -948,7 +953,8 @@ wo_window_new(wo_env_t * const woe, bool fullscreen, const wo_rect_t pos, const 
     wowin->title = strdup(title);
 
     wofb = wo_fb_new_rgba_pixel(woe, 0, 0, 0, UINT32_MAX);
-    wowin->wos = wo_make_surface_z(woe, NULL, 0);
+    // We have now setup enough that we can make a surface on ourselves
+    wowin->wos = wo_make_surface_z(wowin, NULL, 0);
     wo_surface_attach_fb(wowin->wos, wofb, pos);
 
     pollqueue_callback_once(woe->pq, window_new_pq, wowin);
@@ -1003,10 +1009,10 @@ linux_dmabuf_v1_listener_format(void *data,
                                 uint32_t format)
 {
     // Superceeded by _modifier
-    window_ctx_t *const wc = data;
+    wo_env_t *const woe = data;
     (void)zwp_linux_dmabuf_v1;
 
-    fmt_list_add(&wc->fmt_list, format, DRM_FORMAT_MOD_LINEAR);
+    fmt_list_add(&woe->fmt_list, format, DRM_FORMAT_MOD_LINEAR);
 }
 
 static void
@@ -1016,10 +1022,10 @@ linux_dmabuf_v1_listener_modifier(void *data,
                                   uint32_t modifier_hi,
                                   uint32_t modifier_lo)
 {
-    window_ctx_t *const wc = data;
+    wo_env_t *const woe = data;
     (void)zwp_linux_dmabuf_v1;
 
-    fmt_list_add(&wc->fmt_list, format, ((uint64_t)modifier_hi << 32) | modifier_lo);
+    fmt_list_add(&woe->fmt_list, format, ((uint64_t)modifier_hi << 32) | modifier_lo);
 }
 
 static const struct zwp_linux_dmabuf_v1_listener linux_dmabuf_v1_listener = {
@@ -1047,12 +1053,12 @@ global_registry_handler(void *data, struct wl_registry *registry, uint32_t id,
     // v4 reworks format listing again to be more complex - avoid for now
     if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
         woe->linux_dmabuf_v1 = wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, 3);
-        zwp_linux_dmabuf_v1_add_listener(woe->linux_dmabuf_v1, &linux_dmabuf_v1_listener, wc);
+        zwp_linux_dmabuf_v1_add_listener(woe->linux_dmabuf_v1, &linux_dmabuf_v1_listener, woe);
     }
 
     if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
         woe->wm_base = wl_registry_bind(registry, id, &xdg_wm_base_interface, 1);
-        xdg_wm_base_add_listener(woe->wm_base, &xdg_wm_base_listener, NULL);
+        xdg_wm_base_add_listener(woe->wm_base, &xdg_wm_base_listener, woe);
     }
     if (strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0)
         woe->decoration_manager = wl_registry_bind(registry, id, &zxdg_decoration_manager_v1_interface, 1);
@@ -1106,8 +1112,8 @@ get_display_and_registry(wo_env_t *const woe)
     // In theory supported extensions are dynamic - ignore that
     wl_registry_destroy(registry);
 
-    wc->w_display = display;
-    fmt_list_sort(&wc->fmt_list);
+    woe->w_display = display;
+    fmt_list_sort(&woe->fmt_list);
     return 0;
 
 fail:
@@ -1210,18 +1216,18 @@ eq_sync_pq_cb(void * v, short revents)
     // No flush needed as that will occur as part of the pollqueue loop
 }
 
-static int
+int
 wo_env_sync(wo_env_t * const woe)
 {
     struct eq_sync_env_ss eqs = {.woe = woe};
     int rv;
 
-    if (!eq)
+    if (!woe)
         return -1;
 
     sem_init(&eqs.sem, 0, 0);
     // Bounce execution to pollqueue to avoid race setting up listener
-    pollqueue_callback_once(eq->pq, eq_sync_pq_cb, &eqs);
+    pollqueue_callback_once(woe->pq, eq_sync_pq_cb, &eqs);
     while ((rv = sem_wait(&eqs.sem)) == -1 && errno == EINTR)
         /* Loop */;
     sem_destroy(&eqs.sem);
@@ -1252,6 +1258,9 @@ env_free(wo_env_t * const woe)
     wl_display_roundtrip(woe->w_display);
 
     wl_display_disconnect(woe->w_display);
+
+    dmabufs_ctl_unref(&woe->dbsc);
+
     fmt_list_uninit(&woe->fmt_list);
 
     free(woe);
@@ -1275,36 +1284,39 @@ wo_env_new_default(void)
     if (woe == NULL)
         return NULL;
 
-    pthread_mutex_init(&woe->surface_lock, NULL);
+    fmt_list_init(&woe->fmt_list, 16);
 
-    fmt_list_init(&wc->fmt_list, 16);
-
-    if (get_display_and_registry(woe, wc) != 0)
+    if (get_display_and_registry(woe) != 0)
         goto fail;
 
-    if (!wc->compositor) {
+    if (!woe->compositor) {
         LOG("Missing wayland compositor\n");
         goto fail;
     }
-    if (!wc->viewporter) {
+    if (!woe->viewporter) {
         LOG("Missing wayland viewporter\n");
         goto fail;
     }
-    if (!wc->wm_base) {
+    if (!woe->wm_base) {
         LOG("Missing xdg window manager\n");
         goto fail;
     }
-    if (!woe->is_egl && !wc->linux_dmabuf_v1) {
+    if (!woe->linux_dmabuf_v1) {
         LOG("Missing wayland linux_dmabuf extension\n");
         goto fail;
     }
 
-    if ((wc->pq = pollqueue_new()) == NULL) {
-        LOG("Pollqueue setup afiled\n");
+    if ((woe->pq = pollqueue_new()) == NULL) {
+        LOG("Pollqueue setup failed\n");
         goto fail;
     }
 
-    pollqueue_set_pre_post(wc->pq, pollq_pre_cb, pollq_post_cb, wc);
+    if ((woe->dbsc = dmabufs_ctl_new()) == NULL) {
+        LOG("dmabuf setup failed\n");
+        goto fail;
+    }
+
+    pollqueue_set_pre_post(woe->pq, pollq_pre_cb, pollq_post_cb, woe);
 
     return woe;
 
