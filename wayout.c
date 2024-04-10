@@ -103,6 +103,8 @@ struct wo_window_s {
     struct xdg_surface *wm_surface;
     struct xdg_toplevel *wm_toplevel;
 
+    bool sync_wait;
+    sem_t sync_sem;
     pthread_mutex_t surface_lock;
     struct wo_surface_s * surface_chain;
 };
@@ -676,7 +678,7 @@ surface_window_resize_default_cb(void * v, wo_surface_t * wos, const wo_rect_t s
 wo_surface_t *
 wo_make_surface_z(wo_window_t * wowin, const wo_surface_fns_t * fns, unsigned int zpos)
 {
-    wo_surface_t * wos = calloc(1, sizeof(*wos));
+    wo_surface_t * const wos = calloc(1, sizeof(*wos));
 
     static const wo_surface_fns_t default_surf_fns = {
         surface_window_resize_default_cb,
@@ -706,8 +708,8 @@ wo_make_surface_z(wo_window_t * wowin, const wo_surface_fns_t * fns, unsigned in
         if (n != NULL)
             n->prev = wos;
         plane_create(wos->woe, &wos->s,
-                     win_surface->s.surface,  // Parent - all based off window surface
-                     p == NULL ? win_surface->s.surface : p->s.surface, // Above from Z
+                     win_surface != NULL ? win_surface->s.surface : NULL,  // Parent - all based off window surface
+                     p != NULL ? p->s.surface : win_surface != NULL ? win_surface->s.surface : NULL, // Above from Z
                      false);
         wos->parent = win_surface;
     }
@@ -880,11 +882,17 @@ static const struct xdg_toplevel_listener xdg_toplevel_listener = {
 static void
 xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial)
 {
+    wo_window_t * wowin = data;
     (void)data;
 
     LOG("%s: Done\n", __func__);
 
     xdg_surface_ack_configure(xdg_surface, serial);
+
+    if (wowin->sync_wait) {
+        wowin->sync_wait = false;
+        sem_post(&wowin->sync_sem);
+    }
 }
 
 static const struct xdg_surface_listener xdg_surface_listener = {
@@ -925,6 +933,8 @@ window_new_pq(void * v, short revents)
     if (wowin->fullscreen)
         xdg_toplevel_set_fullscreen(wowin->wm_toplevel, NULL);
 
+    wl_surface_commit(wowin->wos->s.surface);
+
     if (!woe->decoration_manager) {
         LOG("No decoration manager\n");
     }
@@ -935,6 +945,7 @@ window_new_pq(void * v, short revents)
         zxdg_toplevel_decoration_v1_set_mode(decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
         // decoration destroyed in the callback
     }
+
 }
 
 // Creates a window surface and adds a black opaque buffer to it
@@ -951,13 +962,20 @@ wo_window_new(wo_env_t * const woe, bool fullscreen, const wo_rect_t pos, const 
     wowin->fullscreen = fullscreen;
     wowin->pos = pos;
     wowin->title = strdup(title);
+    sem_init(&wowin->sync_sem, 0, 0);
 
-    wofb = wo_fb_new_rgba_pixel(woe, 0, 0, 0, UINT32_MAX);
     // We have now setup enough that we can make a surface on ourselves
     wowin->wos = wo_make_surface_z(wowin, NULL, 0);
-    wo_surface_attach_fb(wowin->wos, wofb, pos);
 
+    wowin->sync_wait = true;
     pollqueue_callback_once(woe->pq, window_new_pq, wowin);
+
+    while (sem_wait(&wowin->sync_sem) == -1 && errno == EINTR)
+        /* loop */;
+
+    wofb = wo_fb_new_rgba_pixel(woe, 0, 0, 0, UINT32_MAX);
+    wo_surface_attach_fb(wowin->wos, wofb, wowin->pos);
+
     return wowin;
 }
 
