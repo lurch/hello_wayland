@@ -1,4 +1,5 @@
 #define _GNU_SOURCE 1
+#include <assert.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,6 +62,17 @@ static unsigned int total_bufs = 0;
 static size_t total_size = 0;
 #endif
 
+static void buf_import_free(struct dmabuf_h * dh)
+{
+    (void)dh;
+    // Nothing needed
+}
+
+static const struct dmabuf_fns dmabuf_import_fns = {
+    // None of the other fns should ever be called
+    .buf_free   = buf_import_free,
+};
+
 struct dmabuf_h * dmabuf_import_mmap(void * mapptr, size_t size)
 {
     struct dmabuf_h *dh;
@@ -76,6 +88,7 @@ struct dmabuf_h * dmabuf_import_mmap(void * mapptr, size_t size)
         .fd = -1,
         .size = size,
         .mapptr = mapptr,
+        .fns = &dmabuf_import_fns,
         .flags = DH_FLAG_FAKE,
     };
 
@@ -99,7 +112,8 @@ struct dmabuf_h * dmabuf_import(int fd, size_t size)
     *dh = (struct dmabuf_h) {
         .fd = fd,
         .size = size,
-        .mapptr = MAP_FAILED
+        .mapptr = MAP_FAILED,
+        .fns = &dmabuf_import_fns,
     };
 
 #if TRACE_ALLOC
@@ -134,7 +148,7 @@ void dmabuf_free(struct dmabuf_h * dh)
 
 void dmabuf_unref(struct dmabuf_h ** const ppdh)
 {
-    struct dmabuf_h * dh = *ppdh;
+    struct dmabuf_h * const dh = *ppdh;
     int n;
 
     if (dh == NULL)
@@ -192,7 +206,6 @@ struct dmabuf_h * dmabuf_realloc(struct dmabufs_ctl * dbsc, struct dmabuf_h * ol
 
     if (dh->fns->buf_alloc(dbsc, dh, size) != 0)
         goto fail;
-
 
 #if TRACE_ALLOC
     ++total_bufs;

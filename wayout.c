@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <string.h>
@@ -423,11 +424,14 @@ wo_fb_unref(wo_fb_t ** ppwfb)
 {
     wo_fb_t * wofb = *ppwfb;
     unsigned int i;
+    int n;
 
     if (wofb == NULL)
         return;
 
-    if (atomic_fetch_sub(&wofb->ref_count, 1) != 0)
+    n = atomic_fetch_sub(&wofb->ref_count, 1);
+    LOG("%s: n=%d\n", __func__, n);
+    if (n != 0)
         return;
 
     if (!wofb->pre_delete_fn || !wofb->pre_delete_fn(wofb->pre_delete_v, wofb))
@@ -475,22 +479,28 @@ static void
 fb_release_fence2_cb(void * v, short revents)
 {
     struct fb_fence_wait_s * ffs = v;
+    wo_fb_t *wofb = ffs->wofb;
     (void)revents;
 
-    wo_fb_t *wofb = ffs->wofb;
+    LOG("%s\n", __func__);
+
     polltask_delete(&ffs->pt);
     free(ffs);
-    if (wofb->on_delete_fn)
+    if (wofb->on_release_fn)
         wofb->on_release_fn(wofb->on_release_v, wofb);
+    wo_fb_unref(&wofb);
 }
 
 static void
 fb_release_fence_cb(void *data, struct wl_buffer *wl_buffer)
 {
     wo_fb_t * const wofb = data;
+    struct fb_fence_wait_s * const ffs = malloc(sizeof(*ffs));
     (void)wl_buffer;
-    struct fb_fence_wait_s * ffs = malloc(sizeof(*ffs));
 
+    LOG("%s\n", __func__);
+
+    ffs->wofb = wofb;
     ffs->pt = polltask_new(wofb->woe->pq, dmabuf_fd(wofb->dh[0]), POLLOUT, fb_release_fence2_cb, ffs);
     pollqueue_add_task(ffs->pt, 1000);
 }
@@ -498,10 +508,11 @@ fb_release_fence_cb(void *data, struct wl_buffer *wl_buffer)
 static void
 fb_release_no_fence_cb(void *data, struct wl_buffer *wl_buffer)
 {
-    wo_fb_t * const wofb = data;
+    wo_fb_t * wofb = data;
     (void)wl_buffer;
-    if (wofb->on_delete_fn)
+    if (wofb->on_release_fn)
         wofb->on_release_fn(wofb->on_release_v, wofb);
+    wo_fb_unref(&wofb);
 }
 
 void
@@ -517,7 +528,9 @@ wo_fb_on_release_set(wo_fb_t * const wofb, bool wait_for_fence, wo_fb_on_release
     wofb->on_release_fn = fn;
     wofb->on_release_v = v;
 
-    wl_buffer_add_listener(wofb->way_buf, wait_for_fence ? &fence_listener : &no_fence_listener, wofb);
+    LOG("%s\n", __func__);
+
+    wl_buffer_add_listener(wofb->way_buf, wait_for_fence ? &fence_listener : &no_fence_listener, wo_fb_ref(wofb));
 }
 
 void
@@ -630,6 +643,7 @@ surface_attach_fb_cb(void * v, short revents)
         wp_viewport_set_destination(wos->s.viewport, a->dst_pos.w, a->dst_pos.h);
         if (wos->s.subsurface)
             wl_subsurface_set_position(wos->s.subsurface, a->dst_pos.x, a->dst_pos.y);
+        wl_surface_damage_buffer(wos->s.surface, 0, 0, INT_MAX, INT_MAX);
         wl_surface_commit(wos->s.surface);
         if (wos->parent != NULL)
             wl_surface_commit(wos->parent->s.surface); // Need parent commit for position
@@ -974,7 +988,10 @@ wo_window_new(wo_env_t * const woe, bool fullscreen, const wo_rect_t pos, const 
         /* loop */;
 
     wofb = wo_fb_new_rgba_pixel(woe, 0, 0, 0, UINT32_MAX);
+    wowin->sync_wait = true;
     wo_surface_attach_fb(wowin->wos, wofb, wowin->pos);
+    while (sem_wait(&wowin->sync_sem) == -1 && errno == EINTR)
+        /* loop */;
 
     return wowin;
 }
@@ -1333,6 +1350,9 @@ wo_env_new_default(void)
         LOG("dmabuf setup failed\n");
         goto fail;
     }
+
+    woe->region_all = wl_compositor_create_region(woe->compositor);
+    wl_region_add(woe->region_all, 0, 0, INT32_MAX, INT32_MAX);
 
     pollqueue_set_pre_post(woe->pq, pollq_pre_cb, pollq_post_cb, woe);
 

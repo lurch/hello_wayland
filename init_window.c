@@ -77,6 +77,8 @@ typedef struct vid_out_env_s {
 
     bool frame_wait;
 
+    struct pollqueue * vid_pq;
+
     struct dmabufs_ctl * dbsc;
     dmabuf_pool_t * dpool;
 
@@ -278,7 +280,7 @@ do_display_dmabuf(vid_out_env_t * const ve, AVFrame *const frame)
     // **** Maybe better to attach buf delete to wofb delete?
     wo_fb_on_release_set(wofb, true, w_buffer_release, av_buffer_ref(frame->buf[0]));
 
-    wo_surface_attach_fb(ve->vid, wofb, (wo_rect_t) {0, 0, WINDOW_WIDTH, WINDOW_WIDTH});
+    wo_surface_attach_fb(ve->vid, wofb, (wo_rect_t) {0, 0, WINDOW_WIDTH, WINDOW_HEIGHT});
 }
 
 // ---------------------------------------------------------------------------
@@ -420,7 +422,7 @@ do_display_egl(vid_out_env_t * const ve, AVFrame *const frame)
     // (same as the direct wayland output after buffer release)
     {
         struct dmabuf_w_env_s *const dbe = dmabuf_w_env_new(wc, frame->buf[0], desc->objects[0].fd);
-        dbe->pt = polltask_new(wo_env_pollqueue(ve->woe), desc->objects[0].fd, POLLOUT, dmabuf_fence_release_cb, dbe);
+        dbe->pt = polltask_new(ve->vid_pq, desc->objects[0].fd, POLLOUT, dmabuf_fence_release_cb, dbe);
         pollqueue_add_task(dbe->pt, -1);
     }
 
@@ -698,8 +700,10 @@ static void sw_dmabuf_free(void *opaque, uint8_t *data)
 {
     sw_dmabuf_t * const swd = opaque;
     (void)data;
+    LOG("%s\n", __func__);
     dmabuf_unref(&swd->dh);
     free(swd);
+    LOG("%s 2\n", __func__);
 }
 
 static AVBufferRef *
@@ -781,7 +785,9 @@ sw_dmabuf_make(struct AVCodecContext * const avctx, vid_out_env_t * const vc, co
     return buf;
 
 fail:
+    // swd is freed by freeing buf
     av_buffer_unref(&buf);
+    fprintf(stderr, "WTF\n");
     return NULL;
 }
 
@@ -806,7 +812,8 @@ int egl_wayland_out_get_buffer2(struct AVCodecContext *s, AVFrame *frame, int fl
     (void)flags;
 
     frame->opaque = vc;
-    frame->buf[0] = sw_dmabuf_make(s, vc, frame);
+    if ((frame->buf[0] = sw_dmabuf_make(s, vc, frame)) == NULL)
+        return -1;
     sw_dmabuf_frame_fill(frame, frame->buf[0]);
 
 #else
@@ -901,9 +908,10 @@ try_display(vid_out_env_t *const vc)
         wc->frame_callback = wl_surface_frame(wc->vid.surface);
         wl_callback_add_listener(wc->frame_callback, &frame_listener, vc);
         vc->frame_wait = true;
+#endif
+        usleep(20000);
         if (vc->show_all)
             sem_post(&vc->q_sem);
-#endif
         if (vc->is_egl)
             do_display_egl(vc, frame);
         else
@@ -974,7 +982,7 @@ egl_wayland_out_display(vid_out_env_t *vc, AVFrame *src_frame)
     pthread_mutex_unlock(&vc->q_lock);
 
     if (frame == NULL)
-        pollqueue_callback_once(wo_env_pollqueue(vc->woe), do_prod_display, vc);
+        pollqueue_callback_once(vc->vid_pq, do_prod_display, vc);
     else
         av_frame_free(&frame);
 
@@ -998,6 +1006,8 @@ egl_wayland_out_delete(vid_out_env_t *vc)
 #endif
 
     // **** EGL teardown
+
+    pollqueue_finish(&vc->vid_pq);
 
     wo_surface_detach_fb(vc->vid);
 
@@ -1035,6 +1045,8 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
     ve->dbsc = dmabufs_ctl_new();
     ve->dpool = dmabuf_pool_new_dmabufs(ve->dbsc, 32);
 
+    ve->vid_pq = pollqueue_new();
+
     ve->woe = wo_env_new_default();
     ve->win = wo_window_new(ve->woe, (flags & WOUT_FLAG_FULLSCREEN) != 0,
                             (wo_rect_t) {0, 0, WINDOW_WIDTH, WINDOW_HEIGHT},
@@ -1043,7 +1055,7 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
 
     // Some egl setup must be done on display thread
     if (ve->is_egl) {
-        pollqueue_callback_once(wo_env_pollqueue(ve->woe), do_egl_setup, ve);
+        pollqueue_callback_once(ve->vid_pq, do_egl_setup, ve);
         sem_wait(&ve->egl_setup_sem);
         if (ve->egl_setup_fail) {
             LOG("EGL init failed\n");
