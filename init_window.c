@@ -61,7 +61,10 @@ typedef struct vid_out_env_s {
 
     wo_env_t * woe;
     wo_window_t * win;
+    wo_rect_t win_rect;
     wo_surface_t * vid;
+    unsigned int vid_par_num;
+    unsigned int vid_par_den;
 
     int show_all;
     int fullscreen;
@@ -213,6 +216,52 @@ dmabuf_fence_release_cb(void *v, short revents)
 //
 // Wayland dmabuf display function
 
+static wo_rect_t
+box_rect(const unsigned int par_num, const unsigned int par_den, const wo_rect_t win_rect)
+{
+    wo_rect_t r = win_rect;
+
+    if (par_num == 0 || par_den == 0)
+        return r;
+
+    if (par_num * win_rect.h < par_den * win_rect.w) {
+        // Pillarbox
+        r.w = win_rect.h * par_num / par_den;
+        r.x = (win_rect.w - r.w) / 2;
+    }
+    else {
+        // Letterbox
+        r.h = win_rect.w * par_den / par_num;
+        r.y = (win_rect.h - r.h) / 2;
+    }
+    return r;
+}
+
+static void
+set_vid_par(vid_out_env_t * const ve, const AVFrame * const frame)
+{
+    const unsigned int w = av_frame_cropped_width(frame);
+    const unsigned int h = av_frame_cropped_height(frame);
+    unsigned int par_num = frame->sample_aspect_ratio.num * w;
+    unsigned int par_den = frame->sample_aspect_ratio.den * h;
+
+    if (par_den == 0 || par_num == 0) {
+        if (((w == 720 || w == 704) && (h == 480 || h == 576)) ||
+            ((w == 360 || w == 352) && (h == 240 || h == 288)))
+        {
+            par_num = 4;
+            par_den = 3;
+        }
+        else
+        {
+            par_num = w;
+            par_den = h;
+        }
+    }
+    ve->vid_par_den = par_den;
+    ve->vid_par_num = par_num;
+}
+
 static void
 w_buffer_release(void *data, wo_fb_t *wofb)
 {
@@ -280,7 +329,7 @@ do_display_dmabuf(vid_out_env_t * const ve, AVFrame *const frame)
     // **** Maybe better to attach buf delete to wofb delete?
     wo_fb_on_release_set(wofb, true, w_buffer_release, av_buffer_ref(frame->buf[0]));
 
-    wo_surface_attach_fb(ve->vid, wofb, (wo_rect_t) {0, 0, WINDOW_WIDTH, WINDOW_HEIGHT});
+    wo_surface_attach_fb(ve->vid, wofb, box_rect(ve->vid_par_num, ve->vid_par_den, ve->win_rect));
 }
 
 // ---------------------------------------------------------------------------
@@ -700,10 +749,8 @@ static void sw_dmabuf_free(void *opaque, uint8_t *data)
 {
     sw_dmabuf_t * const swd = opaque;
     (void)data;
-    LOG("%s\n", __func__);
     dmabuf_unref(&swd->dh);
     free(swd);
-    LOG("%s 2\n", __func__);
 }
 
 static AVBufferRef *
@@ -912,6 +959,8 @@ try_display(vid_out_env_t *const vc)
         usleep(20000);
         if (vc->show_all)
             sem_post(&vc->q_sem);
+
+        set_vid_par(vc, frame);
         if (vc->is_egl)
             do_display_egl(vc, frame);
         else
@@ -1027,6 +1076,14 @@ egl_wayland_out_delete(vid_out_env_t *vc)
     free(vc);
 }
 
+static void
+vid_resize_dmabuf_cb(void * v, wo_surface_t * wos, const wo_rect_t win_pos)
+{
+    vid_out_env_t *const ve = v;
+
+    ve->win_rect = win_pos;
+    wo_surface_dst_pos_set(wos, box_rect(ve->vid_par_num, ve->vid_par_den, ve->win_rect));
+}
 
 static vid_out_env_t*
 wayland_out_new(const bool is_egl, const unsigned int flags)
@@ -1052,6 +1109,11 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
                             (wo_rect_t) {0, 0, WINDOW_WIDTH, WINDOW_HEIGHT},
                             ve->is_egl ? "EGL video" : "Dmabuf video");
     ve->vid = wo_make_surface_z(ve->win, NULL, 10);
+    ve->win_rect = wo_window_size(ve->win);
+    wo_surface_dst_pos_set(ve->vid, ve->win_rect);
+
+    if (!ve->is_egl)
+        wo_surface_on_win_resize_set(ve->vid, vid_resize_dmabuf_cb, ve);
 
     // Some egl setup must be done on display thread
     if (ve->is_egl) {

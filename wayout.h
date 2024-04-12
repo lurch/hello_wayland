@@ -27,6 +27,34 @@ typedef struct wo_rect_s {
     uint32_t w, h;
 } wo_rect_t;
 
+static inline int_fast32_t
+wo_rect_rescale_1s(int_fast32_t x, uint_fast32_t mul, uint_fast32_t div)
+{
+    const int_fast64_t m = x * (int_fast64_t)mul;
+    const uint_fast32_t d2 = div/2;
+    return div == 0 ? (int_fast32_t)m :
+        m >= 0 ? (int_fast32_t)(((uint_fast64_t)m + d2) / div) :
+            -(int_fast32_t)(((uint_fast64_t)(-m) + d2) / div);
+}
+
+static inline uint_fast32_t
+wo_rect_rescale_1u(uint_fast32_t x, uint_fast32_t mul, uint_fast32_t div)
+{
+    const uint_fast64_t m = x * (uint_fast64_t)mul;
+    return (uint_fast32_t)(div == 0 ? m : (m + div/2) / div);
+}
+
+static inline wo_rect_t
+wo_rect_rescale(const wo_rect_t s, const wo_rect_t mul, const wo_rect_t div)
+{
+    return (wo_rect_t){
+        .x = wo_rect_rescale_1s(s.x - div.x, mul.w, div.w) + mul.x,
+        .y = wo_rect_rescale_1s(s.y - div.y, mul.h, div.h) + mul.y,
+        .w = wo_rect_rescale_1u(s.w,         mul.w, div.w),
+        .h = wo_rect_rescale_1u(s.h,         mul.h, div.h)
+    };
+}
+
 typedef void (* wo_surface_window_resize_fn)(void * v, wo_surface_t * wos, const wo_rect_t size);
 
 typedef struct wo_surface_fns_s {
@@ -69,6 +97,9 @@ void wo_fb_read_end(wo_fb_t * wfb);
 
 int wo_surface_commit(wo_surface_t * wsurf);
 
+typedef void (*wo_surface_win_resize_fn)(void * v, wo_surface_t * wos, const wo_rect_t win_pos);
+
+void wo_surface_on_win_resize_set(wo_surface_t * wos, wo_surface_win_resize_fn fn, void *v);
 int wo_surface_dst_pos_set(wo_surface_t * const wos, const wo_rect_t pos);
 unsigned int wo_surface_dst_width(const wo_surface_t * const wos);
 unsigned int wo_surface_dst_height(const wo_surface_t * const wos);

@@ -47,22 +47,6 @@ typedef struct subplane_s {
     struct wp_viewport * viewport;
 } subplane_t;
 
-struct wo_surface_s {
-    atomic_int ref_count;
-    struct wo_surface_s * next;
-    struct wo_surface_s * prev;
-
-    wo_env_t * woe;
-    wo_window_t * wowin;
-    wo_surface_t * parent;  // No ref - just a pointer (currently)
-    unsigned int zpos;
-
-    wo_rect_t dst_pos;
-    wo_surface_fns_t fns;
-    struct wl_egl_window * egl_window;
-    subplane_t s;
-};
-
 #define WO_FB_PLANES 4
 
 struct wo_fb_s {
@@ -88,6 +72,29 @@ struct wo_fb_s {
     void * pre_delete_v;
     wo_fb_on_release_fn on_release_fn;
     void * on_release_v;
+};
+
+
+struct wo_surface_s {
+    atomic_int ref_count;
+    struct wo_surface_s * next;
+    struct wo_surface_s * prev;
+
+    wo_env_t * woe;
+    wo_window_t * wowin;
+    wo_surface_t * parent;  // No ref - just a pointer (currently)
+    wo_fb_t * wofb;         // Currently attached fb
+    unsigned int zpos;
+
+    wo_rect_t src_pos;      // Last viewport src set
+    wo_rect_t dst_pos;      // Viewport dst size & subsurface pos
+    wo_surface_fns_t fns;
+    struct wl_egl_window * egl_window;
+
+    wo_surface_win_resize_fn win_resize_fn;
+    void * win_resize_v;
+
+    subplane_t s;
 };
 
 struct wo_window_s {
@@ -430,7 +437,7 @@ wo_fb_unref(wo_fb_t ** ppwfb)
         return;
 
     n = atomic_fetch_sub(&wofb->ref_count, 1);
-    LOG("%s: n=%d\n", __func__, n);
+//    LOG("%s: n=%d\n", __func__, n);
     if (n != 0)
         return;
 
@@ -482,7 +489,7 @@ fb_release_fence2_cb(void * v, short revents)
     wo_fb_t *wofb = ffs->wofb;
     (void)revents;
 
-    LOG("%s\n", __func__);
+//    LOG("%s\n", __func__);
 
     polltask_delete(&ffs->pt);
     free(ffs);
@@ -498,7 +505,7 @@ fb_release_fence_cb(void *data, struct wl_buffer *wl_buffer)
     struct fb_fence_wait_s * const ffs = malloc(sizeof(*ffs));
     (void)wl_buffer;
 
-    LOG("%s\n", __func__);
+//    LOG("%s\n", __func__);
 
     ffs->wofb = wofb;
     ffs->pt = polltask_new(wofb->woe->pq, dmabuf_fd(wofb->dh[0]), POLLOUT, fb_release_fence2_cb, ffs);
@@ -527,8 +534,6 @@ wo_fb_on_release_set(wo_fb_t * const wofb, bool wait_for_fence, wo_fb_on_release
 
     wofb->on_release_fn = fn;
     wofb->on_release_v = v;
-
-    LOG("%s\n", __func__);
 
     wl_buffer_add_listener(wofb->way_buf, wait_for_fence ? &fence_listener : &no_fence_listener, wo_fb_ref(wofb));
 }
@@ -609,6 +614,7 @@ wo_surface_commit(wo_surface_t * wsurf)
 }
 
 struct surface_attach_fb_arg_s {
+    bool detach;
     wo_surface_t * wos;
     wo_fb_t * wofb;
     wo_rect_t dst_pos;
@@ -628,24 +634,51 @@ surface_attach_fb_cb(void * v, short revents)
     struct surface_attach_fb_arg_s * const a = v;
     wo_surface_t * const wos = a->wos;
     wo_fb_t * const wofb = a->wofb;
+    bool commit_req_this = false;
+    bool commit_req_parent = false;
     (void)revents;
 
-    if (wofb == NULL) {
-        wl_surface_attach(wos->s.surface, NULL, 0, 0);
-        wl_surface_commit(wos->s.surface);
+    if (a->detach) {
+        if (wos->wofb != NULL) {
+            wl_surface_attach(wos->s.surface, NULL, 0, 0);
+            wl_surface_commit(wos->s.surface);
+            wo_fb_unref(&wos->wofb);
+        }
     }
     else {
-        wl_surface_attach(wos->s.surface, wofb->way_buf, 0, 0);
-        if (wofb->crop.w != 0 && wofb->crop.h != 0)
-            wp_viewport_set_source(wos->s.viewport,
-                                   wofb->crop.x >> 8, wofb->crop.y >> 8,
-                                   wofb->crop.w >> 8, wofb->crop.h >> 8);
-        wp_viewport_set_destination(wos->s.viewport, a->dst_pos.w, a->dst_pos.h);
-        if (wos->s.subsurface)
-            wl_subsurface_set_position(wos->s.subsurface, a->dst_pos.x, a->dst_pos.y);
-        wl_surface_damage_buffer(wos->s.surface, 0, 0, INT_MAX, INT_MAX);
-        wl_surface_commit(wos->s.surface);
-        if (wos->parent != NULL)
+        const bool use_dst = (a->dst_pos.w != 0 && a->dst_pos.h != 0);
+        if (wofb != NULL && wofb != wos->wofb) {
+            wl_surface_attach(wos->s.surface, wofb->way_buf, 0, 0);
+            wl_surface_damage_buffer(wos->s.surface, 0, 0, INT_MAX, INT_MAX);
+            wo_fb_unref(&wos->wofb);
+            wos->wofb = wo_fb_ref(wofb);
+            commit_req_this = true;
+        }
+        if (wofb != NULL &&
+            (wofb->crop.x != wos->src_pos.x || wofb->crop.y != wos->src_pos.y ||
+             wofb->crop.w != wos->src_pos.w || wofb->crop.h != wos->src_pos.h)) {
+            if (wofb->crop.w != 0 && wofb->crop.h != 0) {
+                wp_viewport_set_source(wos->s.viewport,
+                                       wofb->crop.x >> 8, wofb->crop.y >> 8,
+                                       wofb->crop.w >> 8, wofb->crop.h >> 8);
+                wos->src_pos = wofb->crop;
+                commit_req_this = true;
+            }
+        }
+        if (use_dst) {
+            if (wos->dst_pos.w != a->dst_pos.w || wos->dst_pos.h != a->dst_pos.h) {
+                commit_req_this = true;
+                wp_viewport_set_destination(wos->s.viewport, a->dst_pos.w, a->dst_pos.h);
+            }
+            if (wos->s.subsurface && (wos->dst_pos.x != a->dst_pos.x || wos->dst_pos.y != a->dst_pos.y)) {
+                commit_req_parent = true;
+                wl_subsurface_set_position(wos->s.subsurface, a->dst_pos.x, a->dst_pos.y);
+            }
+            wos->dst_pos = a->dst_pos;
+        }
+        if (commit_req_this)
+            wl_surface_commit(wos->s.surface);
+        if (commit_req_parent)
             wl_surface_commit(wos->parent->s.surface); // Need parent commit for position
     }
 
@@ -662,10 +695,10 @@ wo_surface_attach_fb(wo_surface_t * wos, wo_fb_t * wofb, const wo_rect_t dst_pos
     if (a == NULL)
         return -ENOMEM;
 
+    a->detach = (wofb == NULL);
     a->wos = wo_surface_ref(wos);
     a->wofb = wo_fb_ref(wofb);
     a->dst_pos = dst_pos;
-    wos->dst_pos = dst_pos;
 
     if ((rv = pollqueue_callback_once(woe->pq, surface_attach_fb_cb, a)) != 0) {
         surface_attach_fb_free(a);
@@ -731,14 +764,33 @@ wo_make_surface_z(wo_window_t * wowin, const wo_surface_fns_t * fns, unsigned in
     return wos;
 }
 
+void
+wo_surface_on_win_resize_set(wo_surface_t * wos, wo_surface_win_resize_fn fn, void *v)
+{
+    wos->win_resize_fn = fn;
+    wos->win_resize_v = v;
+}
+
 int
 wo_surface_dst_pos_set(wo_surface_t * const wos, const wo_rect_t pos)
 {
-    (void)wos;
-    (void)pos;
+    wo_env_t * const woe = wos->woe;
+    struct surface_attach_fb_arg_s * a = calloc(1, sizeof(*a));
+    int rv;
 
-    fprintf(stderr, "*** %s: NIF\n", __func__);
-    return -1;
+    if (a == NULL)
+        return -ENOMEM;
+
+    a->detach = false;
+    a->wos = wo_surface_ref(wos);
+    a->wofb = NULL;
+    a->dst_pos = pos;
+
+    if ((rv = pollqueue_callback_once(woe->pq, surface_attach_fb_cb, a)) != 0) {
+        surface_attach_fb_free(a);
+        return rv;
+    }
+    return 0;
 }
 
 unsigned int
@@ -907,6 +959,25 @@ xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t seri
         wowin->sync_wait = false;
         sem_post(&wowin->sync_sem);
     }
+
+    if (wowin->req_h != 0 && wowin->req_w != 0 &&
+        (wowin->pos.w != wowin->req_w || wowin->pos.w != wowin->req_w)) {
+        wo_surface_t *p;
+
+        // Size has changed - spin down list
+        wowin->pos.w = wowin->req_w;
+        wowin->pos.h = wowin->req_h;
+
+        // ** This lock may be be bad in some cases - review when we find them
+        pthread_mutex_lock(&wowin->surface_lock);
+        for (p = wowin->surface_chain; p != NULL; p = p->next) {
+            if (p->win_resize_fn)
+                p->win_resize_fn(p->win_resize_v, p, wowin->pos);
+        }
+        pthread_mutex_unlock(&wowin->surface_lock);
+    }
+
+    LOG("%s: Done 2\n", __func__);
 }
 
 static const struct xdg_surface_listener xdg_surface_listener = {
@@ -962,6 +1033,14 @@ window_new_pq(void * v, short revents)
 
 }
 
+static void
+window_win_resize_cb(void * v, wo_surface_t * wos, const wo_rect_t win_pos)
+{
+    LOG("%s\n", __func__);
+    (void)v;
+    wo_surface_dst_pos_set(wos, win_pos);
+}
+
 // Creates a window surface and adds a black opaque buffer to it
 wo_window_t *
 wo_window_new(wo_env_t * const woe, bool fullscreen, const wo_rect_t pos, const char * const title)
@@ -980,6 +1059,7 @@ wo_window_new(wo_env_t * const woe, bool fullscreen, const wo_rect_t pos, const 
 
     // We have now setup enough that we can make a surface on ourselves
     wowin->wos = wo_make_surface_z(wowin, NULL, 0);
+    wo_surface_on_win_resize_set(wowin->wos, window_win_resize_cb, NULL);
 
     wowin->sync_wait = true;
     pollqueue_callback_once(woe->pq, window_new_pq, wowin);
@@ -987,12 +1067,16 @@ wo_window_new(wo_env_t * const woe, bool fullscreen, const wo_rect_t pos, const 
     while (sem_wait(&wowin->sync_sem) == -1 && errno == EINTR)
         /* loop */;
 
-    wofb = wo_fb_new_rgba_pixel(woe, 0, 0, 0, UINT32_MAX);
     wowin->sync_wait = true;
+    wofb = wo_fb_new_rgba_pixel(woe, 0, 0, 0, UINT32_MAX);
     wo_surface_attach_fb(wowin->wos, wofb, wowin->pos);
+
+    // This is somewhat kludgy but we always seem to get a 2nd configure after
+    // the attach which includes fullscreen if applied
     while (sem_wait(&wowin->sync_sem) == -1 && errno == EINTR)
         /* loop */;
 
+    LOG("Made win\n");
     return wowin;
 }
 

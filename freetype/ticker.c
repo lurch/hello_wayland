@@ -35,7 +35,9 @@ struct ticker_env_s {
     uint32_t format;
     uint64_t modifier;
 
-    wo_rect_t pos;
+    wo_rect_t pos;      // Scaled pos
+    wo_rect_t base_pos;
+    wo_rect_t win_pos;  // Window size that base_pos was placed in
 
     FT_Library    library;
     FT_Face       face;
@@ -136,10 +138,10 @@ do_scroll(ticker_env_t *const te)
         wo_fb_t *const fb0 = te->dfbs[te->bn];
 
 //        printf("tw=%d, pos.w=%d, shl=%d, x=%d\n",
-//               te->target_width, (int)te->pos.w, te->shl,
-//               te->target_width - (int)te->pos.w - te->shl);
-        wo_fb_crop_frac_set(fb0, (wo_rect_t) {.x = MAX(0, te->target_width - (int)te->pos.w - te->shl) << 16, .y = 0,
-                                              .w = te->pos.w << 16, .h = te->pos.h << 16 });
+//               te->target_width, (int)te->base_pos.w, te->shl,
+//               te->target_width - (int)te->base_pos.w - te->shl);
+        wo_fb_crop_frac_set(fb0, (wo_rect_t) {.x = MAX(0, te->target_width - (int)te->base_pos.w - te->shl) << 16, .y = 0,
+                                              .w = te->base_pos.w << 16, .h = te->base_pos.h << 16 });
         wo_surface_attach_fb(te->dp, fb0, te->pos);
         wo_surface_commit(te->dp);
 
@@ -271,7 +273,7 @@ ticker_init(ticker_env_t *const te)
     wo_env_t * const woe = wo_window_env(te->wowin);
     for (unsigned int i = 0; i != 2; ++i)
     {
-        te->dfbs[i] = wo_make_fb(woe, te->target_width, te->pos.h, te->format, te->modifier);
+        te->dfbs[i] = wo_make_fb(woe, te->target_width, te->base_pos.h, te->format, te->modifier);
         if (te->dfbs[i] == NULL)
         {
             fprintf(stderr, "Failed to get frame buffer");
@@ -288,7 +290,7 @@ ticker_init(ticker_env_t *const te)
 int
 ticker_set_face(ticker_env_t *const te, const char *const filename)
 {
-    const FT_Pos buf_height = te->pos.h - 2; // Allow 1 pixel T&B for rounding
+    const FT_Pos buf_height = te->base_pos.h - 2; // Allow 1 pixel T&B for rounding
     FT_Pos scaled_size;
     FT_Pos bb_height;
 
@@ -314,8 +316,8 @@ ticker_set_face(ticker_env_t *const te, const char *const filename)
     }
 
     te->pen.y =  FT_MulDiv(-te->face->bbox.yMin * 32, buf_height, bb_height) + 32;
-    te->target_height = (int)((FT_Pos)te->pos.h - (te->pen.y >> 6)); // Top for rendering purposes
-    te->target_width = MAX(te->bb_width, te->pos.w) + te->bb_width;
+    te->target_height = (int)((FT_Pos)te->base_pos.h - (te->pen.y >> 6)); // Top for rendering purposes
+    te->target_width = MAX(te->bb_width, te->base_pos.w) + te->bb_width;
     te->pen.x = te->target_width * 64; // Start with X pos @ far right hand side
 
     te->use_kerning = FT_HAS_KERNING(te->face);
@@ -329,8 +331,21 @@ ticker_set_shl(ticker_env_t *const te, unsigned int shift_pels)
     return 0;
 }
 
+// This isn't really the way to do this
+// We should probably have a complete rebuild based on the new size
+// but that isn't supported yet (and is very processor intensive if
+// part of a dynamic resize)
+static void
+win_resize_cb(void * v, wo_surface_t * wos, const wo_rect_t win_pos)
+{
+    ticker_env_t * const te = v;
+
+    te->pos = wo_rect_rescale(te->base_pos, win_pos, te->win_pos);
+    wo_surface_dst_pos_set(wos, te->pos);
+}
+
 ticker_env_t*
-ticker_new(struct wo_window_s * wowin, unsigned int x, unsigned int y, unsigned int w, unsigned int h)
+ticker_new(struct wo_window_s * wowin, const wo_rect_t pos, const wo_rect_t win_pos)
 {
     ticker_env_t *te = calloc(1, sizeof(*te));
 
@@ -339,7 +354,9 @@ ticker_new(struct wo_window_s * wowin, unsigned int x, unsigned int y, unsigned 
 
     te->wowin = wowin;
 
-    te->pos = (wo_rect_t) { x, y, w, h };
+    te->pos = pos;
+    te->base_pos = pos;
+    te->win_pos = win_pos;
     te->format = DRM_FORMAT_ARGB8888;
     te->modifier = DRM_FORMAT_MOD_LINEAR;
     te->shl_per_run = 3;
@@ -357,6 +374,7 @@ ticker_new(struct wo_window_s * wowin, unsigned int x, unsigned int y, unsigned 
         goto fail;
     }
 
+    wo_surface_on_win_resize_set(te->dp, win_resize_cb, te);
 
     return te;
 

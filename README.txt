@@ -15,13 +15,19 @@ the refresh speed of the display.
 To build
 --------
 
-Get required libs:
+# Get required libs:
 
 sudo apt install libavcodec-dev libavformat-dev libavfilter-dev libdrm-dev\
  libepoxy-dev libwayland-dev libwayland-bin\
  libwayland-client0 libwayland-egl1 wayland-protocols
 
-Build:
+# For ticker demos
+sudo apt install libfreetype-dev fonts-freefont-ttf
+
+# For kmscube
+sudo apt install libgbm-dev libgles-dev
+
+# Build:
 
 meson setup build
 cd build

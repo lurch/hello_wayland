@@ -72,7 +72,7 @@ runticker_start(wo_window_t * const wowin,
     dfte->cchar = dfte->text;
     dfte->wowin = wo_window_ref(wowin);
 
-    if ((dfte->te = ticker_new(wowin, x, y, w, h)) == NULL) {
+    if ((dfte->te = ticker_new(wowin, (wo_rect_t){x, y, w, h}, wo_window_size(wowin))) == NULL) {
         fprintf(stderr, "Failed to create ticker\n");
         goto fail;
     }
