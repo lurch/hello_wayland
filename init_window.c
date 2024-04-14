@@ -956,7 +956,8 @@ try_display(vid_out_env_t *const vc)
         wl_callback_add_listener(wc->frame_callback, &frame_listener, vc);
         vc->frame_wait = true;
 #endif
-        usleep(20000);
+        // **** show_all
+
         if (vc->show_all)
             sem_post(&vc->q_sem);
 

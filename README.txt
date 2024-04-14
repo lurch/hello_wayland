@@ -6,9 +6,7 @@ buffers from ffmpeg to Wayland. It has two modes - it can play to an EGL
 surface mapped onto a Wayland buffer or it can map the drmprime buffer
 directly to a wayland buffer and play using that (more efficient).
 
-No attempt is made to provide proper pacing or correct scaling. A window
-size is picked and the video is scaled to fill that to that at (probably)
-the refresh speed of the display.
+No attempt is made to provide proper pacing.
 
 (*) Nothing in Wayland is truely simple
 

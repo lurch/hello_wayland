@@ -35,6 +35,7 @@
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <libavcodec/avcodec.h>
@@ -58,6 +59,15 @@ static AVFilterContext *buffersrc_ctx = NULL;
 static AVFilterGraph *filter_graph = NULL;
 
 static AVDictionary *codec_opts = NULL;
+
+static int64_t
+time_us()
+{
+    struct timespec ts = {0,0};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)(ts.tv_nsec / 1000) + (int64_t)(ts.tv_sec * 1000000);
+
+}
 
 static int hw_decoder_init(AVCodecContext *ctx, const enum AVHWDeviceType type)
 {
@@ -90,7 +100,41 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     return AV_PIX_FMT_NONE;
 }
 
-static int decode_write(AVCodecContext * const avctx,
+static int64_t
+frame_pts(const AVFrame * const frame)
+{
+//    return frame->best_effort_timestamp;
+    return frame->pts;
+}
+
+static void
+display_wait(const AVFrame * const frame, const AVRational time_base)
+{
+    static int64_t base_pts = 0;
+    static int64_t base_now = 0;
+
+    // Normalise timestamps to reduce chance of overflow on conversion
+    int64_t now = time_us();
+    int64_t now_delta = now - base_now;
+    int64_t pts = frame_pts(frame);
+    int64_t pts_delta = pts - base_pts;
+    int64_t pts_conv = av_rescale_q(pts_delta, time_base, (AVRational){1, 1000000});  // frame->timebase seems invalid currently
+    int64_t delta = pts_conv - now_delta;
+
+    printf("PTS_delta=%" PRId64 ", Now_delta=%" PRId64 ", TB=%d/%d, Delta=%" PRId64 "\n", pts_delta, now_delta, time_base.num, time_base.den, delta);
+
+    if (delta < 0 || delta > 6000000) {
+        base_pts = pts;
+        base_now = now;
+        return;
+    }
+
+    if (delta > 0)
+        usleep(delta);
+}
+
+static int decode_write(const AVStream * const stream,
+                        AVCodecContext * const avctx,
                         vid_out_env_t * const dpo,
                         AVPacket *packet)
 {
@@ -130,6 +174,7 @@ static int decode_write(AVCodecContext * const avctx,
         }
 
         do {
+            AVRational time_base = stream->time_base;
             if (filter_graph != NULL) {
                 av_frame_unref(frame);
                 ret = av_buffersink_get_frame(buffersink_ctx, frame);
@@ -143,11 +188,13 @@ static int decode_write(AVCodecContext * const avctx,
                     goto fail;
                 }
                 egl_wayland_out_modeset(dpo, av_buffersink_get_w(buffersink_ctx), av_buffersink_get_h(buffersink_ctx), av_buffersink_get_time_base(buffersink_ctx));
+                time_base = av_buffersink_get_time_base(buffersink_ctx);
             }
             else {
                 egl_wayland_out_modeset(dpo, avctx->coded_width, avctx->coded_height, avctx->framerate);
             }
 
+            display_wait(frame, time_base);
             egl_wayland_out_display(dpo, frame);
 
             if (output_file != NULL) {
@@ -288,14 +335,6 @@ end:
     avfilter_inout_free(&outputs);
 
     return ret;
-}
-
-static uint64_t
-us_time()
-{
-    struct timespec ts = {0};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
 void usage()
@@ -568,9 +607,9 @@ retry_hw:
 
     /* actual decoding and dump the raw data */
     {
-        uint64_t t0 = us_time() + 3000; // Allow a few ms so we aren't behind at startup
+        int64_t t0 = time_us() + 3000; // Allow a few ms so we aren't behind at startup
         int pts_seen = 0;
-        uint64_t fake_ts = 0;
+        int64_t fake_ts = 0;
 
         frames = frame_count;
         while (ret >= 0) {
@@ -579,7 +618,7 @@ retry_hw:
 
             if (video_stream == packet.stream_index) {
                 if (pace_input_hz > 0) {
-                    const uint64_t now = us_time();
+                    const int64_t now = time_us();
                     if (now < t0)
                         usleep(t0 - now);
                     else
@@ -597,7 +636,7 @@ retry_hw:
                     }
                 }
 
-                ret = decode_write(decoder_ctx, dpo, &packet);
+                ret = decode_write(video, decoder_ctx, dpo, &packet);
             }
 
             av_packet_unref(&packet);
@@ -607,7 +646,7 @@ retry_hw:
     /* flush the decoder */
     packet.data = NULL;
     packet.size = 0;
-    ret = decode_write(decoder_ctx, dpo, &packet);
+    ret = decode_write(video, decoder_ctx, dpo, &packet);
     av_packet_unref(&packet);
 
     if (output_file)
