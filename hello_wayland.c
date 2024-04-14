@@ -103,7 +103,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 static int64_t
 frame_pts(const AVFrame * const frame)
 {
-    return frame->best_effort_timestamp;
+    return frame->best_effort_timestamp != AV_NOPTS_VALUE ? frame->best_effort_timestamp : frame->pts;
 }
 
 static void
@@ -111,14 +111,19 @@ display_wait(const AVFrame * const frame, const AVRational time_base)
 {
     static int64_t base_pts = 0;
     static int64_t base_now = 0;
+    static int64_t last_conv = 0;
 
-    // Normalise timestamps to reduce chance of overflow on conversion
     int64_t now = time_us();
     int64_t now_delta = now - base_now;
     int64_t pts = frame_pts(frame);
     int64_t pts_delta = pts - base_pts;
-    int64_t pts_conv = av_rescale_q(pts_delta, time_base, (AVRational){1, 1000000});  // frame->timebase seems invalid currently
+    // If we haven't been given any clues then guess 60fps
+    int64_t pts_conv = (pts == AV_NOPTS_VALUE || time_base.den == 0 || time_base.num == 0) ?
+        last_conv + 1000000 / 60;
+        av_rescale_q(pts_delta, time_base, (AVRational) {1, 1000000});  // frame->timebase seems invalid currently
     int64_t delta = pts_conv - now_delta;
+
+    last_conv = pts_conv;
 
     printf("PTS_delta=%" PRId64 ", Now_delta=%" PRId64 ", TB=%d/%d, Delta=%" PRId64 "\n", pts_delta, now_delta, time_base.num, time_base.den, delta);
 
