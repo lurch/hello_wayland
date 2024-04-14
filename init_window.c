@@ -66,22 +66,21 @@ typedef struct vid_out_env_s {
     unsigned int vid_par_num;
     unsigned int vid_par_den;
 
-    int show_all;
+//    int show_all;
     int fullscreen;
-    int prod_fd;
+//    int prod_fd;
 
     pthread_mutex_t q_lock;
-    sem_t egl_setup_sem;
-    bool egl_setup_fail;
+//    sem_t egl_setup_sem;
+//    bool egl_setup_fail;
     bool is_egl;
 
-    sem_t q_sem;
-    AVFrame *q_next;
+//    sem_t q_sem;
+//    AVFrame *q_next;
 
-    bool frame_wait;
+//    bool frame_wait;
 
     struct pollqueue * vid_pq;
-
     struct dmabufs_ctl * dbsc;
     dmabuf_pool_t * dpool;
 
@@ -678,12 +677,10 @@ CreateEGLContext(vid_out_env_t * const ve)
     return EGL_TRUE;
 }
 
-static void
-do_egl_setup(void *v, short revents)
+static int
+do_egl_setup(vid_out_env_t *const vc)
 {
-    vid_out_env_t *const vc = v;
     window_ctx_t *const wc = &vc->wc;
-    (void)revents;
 
     if (!CreateEGLContext(vc))
         goto fail;
@@ -709,12 +706,10 @@ do_egl_setup(void *v, short revents)
         LOG("%s: gl_setup failed\n", __func__);
         goto fail;
     }
-    sem_post(&vc->egl_setup_sem);
-    return;
+    return 0;
 
 fail:
-    vc->egl_setup_fail = true;
-    sem_post(&vc->egl_setup_sem);
+    return -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -908,6 +903,7 @@ int egl_wayland_out_get_buffer2(struct AVCodecContext *s, AVFrame *frame, int fl
 // Display a new frame when (a) we have one and (b) we have had a frame
 // callback from wayland
 
+#if 0
 static void try_display(vid_out_env_t *const de);
 #if 0
 static void
@@ -969,7 +965,7 @@ try_display(vid_out_env_t *const vc)
         av_frame_free(&frame);
     }
 }
-
+#endif
 
 // ---------------------------------------------------------------------------
 //
@@ -1016,13 +1012,23 @@ egl_wayland_out_display(vid_out_env_t *vc, AVFrame *src_frame)
         return AVERROR(EINVAL);
     }
 
+#if 0
     // If show_all then wait for q_next to be empty otherwise
     // (run decode @ max speed) just plow on
     if (vc->show_all) {
         while (sem_wait(&vc->q_sem) == 0 && errno == EINTR)
         /* Loop */;
     }
+#endif
 
+    set_vid_par(vc, frame);
+    if (vc->is_egl)
+        do_display_egl(vc, frame);
+    else
+        do_display_dmabuf(vc, frame);
+    av_frame_free(&frame);
+
+#if 0
     pthread_mutex_lock(&vc->q_lock);
     {
         AVFrame *const t = vc->q_next;
@@ -1031,10 +1037,13 @@ egl_wayland_out_display(vid_out_env_t *vc, AVFrame *src_frame)
     }
     pthread_mutex_unlock(&vc->q_lock);
 
+
+
     if (frame == NULL)
         pollqueue_callback_once(vc->vid_pq, do_prod_display, vc);
     else
         av_frame_free(&frame);
+#endif
 
     return 0;
 }
@@ -1065,14 +1074,14 @@ egl_wayland_out_delete(vid_out_env_t *vc)
     wo_window_unref(&vc->win);
     wo_env_unref(&vc->woe);
 
-    av_frame_free(&vc->q_next);
+//    av_frame_free(&vc->q_next);
     dmabuf_pool_kill(&vc->dpool);
-    av_frame_free(&vc->q_next);
+//    av_frame_free(&vc->q_next);
     dmabufs_ctl_unref(&vc->dbsc);
 
-    sem_destroy(&vc->q_sem);
-    sem_destroy(&vc->egl_setup_sem);
-    pthread_mutex_destroy(&vc->q_lock);
+//    sem_destroy(&vc->q_sem);
+//    sem_destroy(&vc->egl_setup_sem);
+//    pthread_mutex_destroy(&vc->q_lock);
 
     free(vc);
 }
@@ -1094,11 +1103,11 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
     LOG("<<< %s\n", __func__);
 
     ve->is_egl = is_egl;
-    ve->show_all = !(flags & WOUT_FLAG_NO_WAIT);
+//    ve->show_all = !(flags & WOUT_FLAG_NO_WAIT);
 
-    pthread_mutex_init(&ve->q_lock, NULL);
-    sem_init(&ve->egl_setup_sem, 0, 0);
-    sem_init(&ve->q_sem, 0, 1);
+//    pthread_mutex_init(&ve->q_lock, NULL);
+//    sem_init(&ve->egl_setup_sem, 0, 0);
+//    sem_init(&ve->q_sem, 0, 1);
 
     ve->dbsc = dmabufs_ctl_new();
     ve->dpool = dmabuf_pool_new_dmabufs(ve->dbsc, 32);
@@ -1118,9 +1127,7 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
 
     // Some egl setup must be done on display thread
     if (ve->is_egl) {
-        pollqueue_callback_once(ve->vid_pq, do_egl_setup, ve);
-        sem_wait(&ve->egl_setup_sem);
-        if (ve->egl_setup_fail) {
+        if (do_egl_setup(ve) != 0) {
             LOG("EGL init failed\n");
             goto fail;
         }

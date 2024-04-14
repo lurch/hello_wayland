@@ -119,7 +119,7 @@ display_wait(const AVFrame * const frame, const AVRational time_base)
     int64_t pts_delta = pts - base_pts;
     // If we haven't been given any clues then guess 60fps
     int64_t pts_conv = (pts == AV_NOPTS_VALUE || time_base.den == 0 || time_base.num == 0) ?
-        last_conv + 1000000 / 60;
+        last_conv + 1000000 / 60 :
         av_rescale_q(pts_delta, time_base, (AVRational) {1, 1000000});  // frame->timebase seems invalid currently
     int64_t delta = pts_conv - now_delta;
 
