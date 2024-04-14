@@ -66,19 +66,9 @@ typedef struct vid_out_env_s {
     unsigned int vid_par_num;
     unsigned int vid_par_den;
 
-//    int show_all;
     int fullscreen;
-//    int prod_fd;
 
-    pthread_mutex_t q_lock;
-//    sem_t egl_setup_sem;
-//    bool egl_setup_fail;
     bool is_egl;
-
-//    sem_t q_sem;
-//    AVFrame *q_next;
-
-//    bool frame_wait;
 
     struct pollqueue * vid_pq;
     struct dmabufs_ctl * dbsc;
@@ -716,30 +706,6 @@ fail:
 //
 // get_buffer2 for s/w decoders
 
-#if 0
-typedef struct gb2_dmabuf_s
-{
-    void * fb; // ***********************
-} gb2_dmabuf_t;
-
-static void
-do_prod(void *v)
-{
-    static const uint64_t one = 1;
-    vid_out_env_t *const vc = v;
-    write(vc->prod_fd, &one, sizeof(one));
-}
-
-static void gb2_free(void * v, uint8_t * data)
-{
-    gb2_dmabuf_t * const gb2 = v;
-    (void)data;
-
-//    drmu_fb_unref(&gb2->fb); //*******************
-    free(gb2);
-}
-#endif
-
 static void sw_dmabuf_free(void *opaque, uint8_t *data)
 {
     sw_dmabuf_t * const swd = opaque;
@@ -849,7 +815,6 @@ sw_dmabuf_frame_fill(AVFrame * const frame, const AVBufferRef * const buf)
 // Assumes drmprime_out_env in s->opaque
 int egl_wayland_out_get_buffer2(struct AVCodecContext *s, AVFrame *frame, int flags)
 {
-#if 1
     vid_out_env_t * const vc = s->opaque;
     (void)flags;
 
@@ -857,115 +822,8 @@ int egl_wayland_out_get_buffer2(struct AVCodecContext *s, AVFrame *frame, int fl
     if ((frame->buf[0] = sw_dmabuf_make(s, vc, frame)) == NULL)
         return -1;
     sw_dmabuf_frame_fill(frame, frame->buf[0]);
-
-#else
-    drmprime_out_env_t * const dpo = s->opaque;
-    int align[AV_NUM_DATA_POINTERS];
-    int w = frame->width;
-    int h = frame->height;
-    uint64_t mod;
-    const uint32_t fmt = drmu_av_fmt_to_drm(frame->format, &mod);
-    unsigned int i;
-    unsigned int layers;
-    const drmu_fmt_info_t * fmti;
-    gb2_dmabuf_t * gb2;
-    (void)flags;
-
-    assert((s->codec->capabilities & AV_CODEC_CAP_DR1) != 0);
-    assert(fmt != 0);
-
-    // Alignment logic taken directly from avcodec_default_get_buffer2
-    avcodec_align_dimensions2(s, &w, &h, align);
-
-    gb2 = calloc(1, sizeof(*gb2));
-    if ((gb2->fb = drmu_pool_fb_new(dpo->pic_pool, w, h, fmt, mod)) == NULL)
-        return AVERROR(ENOMEM);
-
-    frame->buf[0] = av_buffer_create((uint8_t*)gb2, sizeof(*gb2), gb2_free, gb2, 0);
-
-    fmti = drmu_fb_format_info_get(gb2->fb);
-    layers = drmu_fmt_info_plane_count(fmti);
-
-    for (i = 0; i != layers; ++i) {
-        frame->data[i] = drmu_fb_data(gb2->fb, i);
-        frame->linesize[i] = drmu_fb_pitch(gb2->fb, i);
-    }
-
-    drmu_fb_write_start(gb2->fb);
-
-    frame->opaque = dpo;
-#endif
     return 0;
 }
-
-// ---------------------------------------------------------------------------
-//
-// Display a new frame when (a) we have one and (b) we have had a frame
-// callback from wayland
-
-#if 0
-static void try_display(vid_out_env_t *const de);
-#if 0
-static void
-surface_frame_done_cb(void *data, struct wl_callback *cb, uint32_t time)
-{
-    vid_out_env_t *const vc = data;
-    (void)time;
-
-    vc->wc.frame_callback = NULL;
-    wl_callback_destroy(cb);
-
-    vc->frame_wait = false;
-    try_display(vc);
-}
-#endif
-
-static void
-do_prod_display(void *v, short revents)
-{
-    (void)revents;
-    try_display(v);
-}
-
-static void
-try_display(vid_out_env_t *const vc)
-{
-//    window_ctx_t *const wc = &vc->wc;
-    AVFrame *frame;
-
-    // Wait for prod from frame_done if show_all;
-    // Just give up if pollqueue has been deleted (might happen during
-    // shutdown on a late frame_done callback - race avoided as once pq
-    // has been killed wayland needs manual roundtrips)
-//    if (/* vc->frame_wait || */ vc->wc.pq == NULL)
-//        return;
-
-    pthread_mutex_lock(&vc->q_lock);
-    frame = vc->q_next;
-    vc->q_next = NULL;
-    pthread_mutex_unlock(&vc->q_lock);
-
-    if (frame) {
-#if 0
-        static const struct wl_callback_listener frame_listener = { .done = surface_frame_done_cb };
-        wc->frame_callback = wl_surface_frame(wc->vid.surface);
-        wl_callback_add_listener(wc->frame_callback, &frame_listener, vc);
-        vc->frame_wait = true;
-#endif
-        // **** show_all
-
-        if (vc->show_all)
-            sem_post(&vc->q_sem);
-
-        set_vid_par(vc, frame);
-        if (vc->is_egl)
-            do_display_egl(vc, frame);
-        else
-            do_display_dmabuf(vc, frame);
-        av_frame_free(&frame);
-    }
-}
-#endif
 
 // ---------------------------------------------------------------------------
 //
@@ -1012,38 +870,12 @@ egl_wayland_out_display(vid_out_env_t *vc, AVFrame *src_frame)
         return AVERROR(EINVAL);
     }
 
-#if 0
-    // If show_all then wait for q_next to be empty otherwise
-    // (run decode @ max speed) just plow on
-    if (vc->show_all) {
-        while (sem_wait(&vc->q_sem) == 0 && errno == EINTR)
-        /* Loop */;
-    }
-#endif
-
     set_vid_par(vc, frame);
     if (vc->is_egl)
         do_display_egl(vc, frame);
     else
         do_display_dmabuf(vc, frame);
     av_frame_free(&frame);
-
-#if 0
-    pthread_mutex_lock(&vc->q_lock);
-    {
-        AVFrame *const t = vc->q_next;
-        vc->q_next = frame;
-        frame = t;
-    }
-    pthread_mutex_unlock(&vc->q_lock);
-
-
-
-    if (frame == NULL)
-        pollqueue_callback_once(vc->vid_pq, do_prod_display, vc);
-    else
-        av_frame_free(&frame);
-#endif
 
     return 0;
 }
@@ -1074,15 +906,8 @@ egl_wayland_out_delete(vid_out_env_t *vc)
     wo_window_unref(&vc->win);
     wo_env_unref(&vc->woe);
 
-//    av_frame_free(&vc->q_next);
     dmabuf_pool_kill(&vc->dpool);
-//    av_frame_free(&vc->q_next);
     dmabufs_ctl_unref(&vc->dbsc);
-
-//    sem_destroy(&vc->q_sem);
-//    sem_destroy(&vc->egl_setup_sem);
-//    pthread_mutex_destroy(&vc->q_lock);
-
     free(vc);
 }
 
@@ -1103,11 +928,6 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
     LOG("<<< %s\n", __func__);
 
     ve->is_egl = is_egl;
-//    ve->show_all = !(flags & WOUT_FLAG_NO_WAIT);
-
-//    pthread_mutex_init(&ve->q_lock, NULL);
-//    sem_init(&ve->egl_setup_sem, 0, 0);
-//    sem_init(&ve->q_sem, 0, 1);
 
     ve->dbsc = dmabufs_ctl_new();
     ve->dpool = dmabuf_pool_new_dmabufs(ve->dbsc, 32);
