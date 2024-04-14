@@ -816,7 +816,7 @@ wo_surface_egl_window_create(wo_surface_t * const wos, const wo_rect_t dst_pos)
 {
     if (wos->egl_window == NULL)
         wos->egl_window = wl_egl_window_create(wos->s.surface, dst_pos.w, dst_pos.h);
-    wos->dst_pos = dst_pos;
+    wo_surface_dst_pos_set(wos, dst_pos);
     return wos->egl_window;
 }
 

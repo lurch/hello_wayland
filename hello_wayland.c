@@ -103,8 +103,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 static int64_t
 frame_pts(const AVFrame * const frame)
 {
-//    return frame->best_effort_timestamp;
-    return frame->pts;
+    return frame->best_effort_timestamp;
 }
 
 static void
