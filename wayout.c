@@ -145,6 +145,13 @@ struct wo_env_s {
 // Format list creation & lookup
 // Currently only used for dmabuf
 
+// Remove any params from a modifier
+static inline uint64_t
+canon_mod(const uint64_t m)
+{
+    return fourcc_mod_is_vendor(m, BROADCOM) ? fourcc_mod_broadcom_mod(m) : m;
+}
+
 static int
 fmt_list_add(fmt_list_t *const fl, uint32_t fmt, uint64_t mod)
 {
@@ -180,7 +187,6 @@ fmt_list_sort(fmt_list_t *const fl)
     qsort(fl->fmts, fl->len, sizeof(*fl->fmts), fmt_sort_cb);
 }
 
-#if 0
 static bool
 fmt_list_find(const fmt_list_t *const fl, const uint32_t fmt, const uint64_t mod)
 {
@@ -197,7 +203,6 @@ fmt_list_find(const fmt_list_t *const fl, const uint32_t fmt, const uint64_t mod
         return fe != NULL;
     }
 }
-#endif
 
 static void
 fmt_list_uninit(fmt_list_t *const fl)
@@ -763,6 +768,15 @@ wo_make_surface_z(wo_window_t * wowin, const wo_surface_fns_t * fns, unsigned in
     }
     pthread_mutex_unlock(&wowin->surface_lock);
     return wos;
+}
+
+bool
+wo_surface_dmabuf_fmt_check(wo_surface_t * const wos, const uint32_t fmt, const uint64_t mod)
+{
+    wo_env_t * const woe = wos->woe;
+    const uint64_t cmod = canon_mod(mod);
+    return fmt_list_find(&woe->fmt_list, fmt, mod) ||
+        (mod != cmod && fmt_list_find(&woe->fmt_list, fmt, cmod));
 }
 
 void

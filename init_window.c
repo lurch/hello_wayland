@@ -268,22 +268,21 @@ do_display_dmabuf(vid_out_env_t * const ve, AVFrame *const frame)
         (AVDRMFrameDescriptor * ) frame->data[0] :
         &((sw_dmabuf_t *)(frame->buf[0]->data))->desc;
     const uint32_t format = desc->layers[0].format;
-//    const uint64_t cmod = canon_mod(desc->objects[0].format_modifier);
     const unsigned int width = av_frame_cropped_width(frame);
     const unsigned int height = av_frame_cropped_height(frame);
     wo_fb_t * wofb = NULL;
     unsigned int n = 0;
-//    unsigned int flags = 0;
+    const uint64_t mod = desc->objects[0].format_modifier;
     int i;
 
 #if TRACE_ALL
     LOG("<<< %s\n", __func__);
 #endif
 
-//    if (!fmt_list_find(&wc->fmt_list, format, cmod)) {
-//        LOG("No support for format %s mod %#"PRIx64"\n", av_fourcc2str(format), cmod);
-//        return;
-//    }
+    if (!wo_surface_dmabuf_fmt_check(ve->vid, format, mod)) {
+        LOG("No support for format %s mod %#"PRIx64"\n", av_fourcc2str(format), mod);
+        return;
+    }
 
     {
         struct dmabuf_h * dhs[4];
@@ -305,7 +304,7 @@ do_display_dmabuf(vid_out_env_t * const ve, AVFrame *const frame)
         }
 
         wofb = wo_fb_new_dh(ve->woe, width, height,
-                            format, desc->objects[0].format_modifier,
+                            format, mod,
                             desc->nb_objects, dhs,
                             n, offsets, strides, obj_nos);
     }

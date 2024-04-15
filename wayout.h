@@ -99,6 +99,7 @@ int wo_surface_commit(wo_surface_t * wsurf);
 
 typedef void (*wo_surface_win_resize_fn)(void * v, wo_surface_t * wos, const wo_rect_t win_pos);
 
+bool wo_surface_dmabuf_fmt_check(wo_surface_t * const wos, const uint32_t fmt, const uint64_t mod);
 void wo_surface_on_win_resize_set(wo_surface_t * wos, wo_surface_win_resize_fn fn, void *v);
 int wo_surface_dst_pos_set(wo_surface_t * const wos, const wo_rect_t pos);
 unsigned int wo_surface_dst_width(const wo_surface_t * const wos);
