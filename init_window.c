@@ -464,7 +464,8 @@ do_display_egl(vid_out_env_t * const ve, AVFrame *const frame)
         pollqueue_add_task(dbe->pt, -1);
     }
 
-    wo_surface_dst_pos_set(ve->vid, (wo_rect_t){0, 0, WINDOW_WIDTH, WINDOW_HEIGHT});
+    // *** EGL plane resize missing - this is a cheat
+    wo_surface_dst_pos_set(ve->vid, box_rect(ve->vid_par_num, ve->vid_par_den, ve->win_rect));
 }
 
 // ---------------------------------------------------------------------------
@@ -813,7 +814,7 @@ sw_dmabuf_frame_fill(AVFrame * const frame, const AVBufferRef * const buf)
 }
 
 // Assumes drmprime_out_env in s->opaque
-int egl_wayland_out_get_buffer2(struct AVCodecContext *s, AVFrame *frame, int flags)
+int vidout_wayland_get_buffer2(struct AVCodecContext *s, AVFrame *frame, int flags)
 {
     vid_out_env_t * const vc = s->opaque;
     (void)flags;
@@ -830,7 +831,7 @@ int egl_wayland_out_get_buffer2(struct AVCodecContext *s, AVFrame *frame, int fl
 // External entry points
 
 void
-egl_wayland_out_modeset(vid_out_env_t *vc, int w, int h, AVRational frame_rate)
+vidout_wayland_modeset(vid_out_env_t *vc, int w, int h, AVRational frame_rate)
 {
     (void)vc;
     (void)w;
@@ -840,7 +841,7 @@ egl_wayland_out_modeset(vid_out_env_t *vc, int w, int h, AVRational frame_rate)
 }
 
 int
-egl_wayland_out_display(vid_out_env_t *vc, AVFrame *src_frame)
+vidout_wayland_display(vid_out_env_t *vc, AVFrame *src_frame)
 {
     AVFrame *frame = NULL;
 
@@ -882,7 +883,7 @@ egl_wayland_out_display(vid_out_env_t *vc, AVFrame *src_frame)
 
 
 void
-egl_wayland_out_delete(vid_out_env_t *vc)
+vidout_wayland_delete(vid_out_env_t *vc)
 {
     if (vc == NULL)
         return;
@@ -958,12 +959,12 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
     return ve;
 
 fail:
-    egl_wayland_out_delete(ve);
+    vidout_wayland_delete(ve);
     return NULL;
 }
 
 vid_out_env_t*
-egl_wayland_out_new(unsigned int flags)
+vidout_wayland_new(unsigned int flags)
 {
     return wayland_out_new(true, flags);
 }
@@ -975,14 +976,14 @@ dmabuf_wayland_out_new(unsigned int flags)
 }
 
 
-void egl_wayland_out_runticker(vid_out_env_t * ve)
+void vidout_wayland_runticker(vid_out_env_t * ve, const char * text)
 {
     static const char fontfile[] = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf";
     wo_rect_t r = wo_window_size(ve->win);
-    ve->rte = runticker_start(ve->win, r.w / 10, r.h * 8 / 10, r.w * 8 / 10, r.h / 10, "Wombats are go!", fontfile);
+    ve->rte = runticker_start(ve->win, r.w / 10, r.h * 8 / 10, r.w * 8 / 10, r.h / 10, text, fontfile);
 }
 
-void egl_wayland_out_runcube(vid_out_env_t * ve)
+void vidout_wayland_runcube(vid_out_env_t * ve)
 {
     wo_rect_t r = wo_window_size(ve->win);
     unsigned int w = r.w > r.h ? r.h : r.w;

@@ -668,6 +668,7 @@ surface_attach_fb_cb(void * v, short revents)
         if (use_dst) {
             if (wos->dst_pos.w != a->dst_pos.w || wos->dst_pos.h != a->dst_pos.h) {
                 commit_req_this = true;
+                commit_req_parent = (wos->parent != NULL);
                 wp_viewport_set_destination(wos->s.viewport, a->dst_pos.w, a->dst_pos.h);
             }
             if (wos->s.subsurface && (wos->dst_pos.x != a->dst_pos.x || wos->dst_pos.y != a->dst_pos.y)) {
@@ -868,7 +869,8 @@ decoration_configure_cb(void *data,
                         uint32_t mode)
 {
     (void)data;
-    LOG("%s: mode %d\n", __func__, mode);
+    (void)mode;
+//    LOG("%s: mode %d\n", __func__, mode);
     zxdg_toplevel_decoration_v1_destroy(zxdg_toplevel_decoration_v1);
 }
 
@@ -887,14 +889,15 @@ xdg_toplevel_configure_cb(void *data,
                           struct wl_array *states)
 {
     wo_window_t *const wowin = data;
-    enum xdg_toplevel_state *p;
+
+//    enum xdg_toplevel_state *p;
+//    LOG("%s: %dx%d\n", __func__, w, h);
+//    wl_array_for_each(p, states) {
+//        LOG("    State: %d\n", *p);
+//    }
+
     (void)xdg_toplevel;
     (void)states;
-
-    LOG("%s: %dx%d\n", __func__, w, h);
-    wl_array_for_each(p, states) {
-        LOG("    State: %d\n", *p);
-    }
 
     // no window geometry event, ignore
     if (w == 0 && h == 0)
@@ -918,7 +921,9 @@ xdg_toplevel_configure_bounds_cb(void *data,
 {
     (void)data;
     (void)xdg_toplevel;
-    LOG("%s: %dx%d\n", __func__, width, height);
+    (void)width;
+    (void)height;
+//    LOG("%s: %dx%d\n", __func__, width, height);
 }
 
 static void
@@ -951,7 +956,7 @@ xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t seri
     wo_window_t * wowin = data;
     (void)data;
 
-    LOG("%s: Done\n", __func__);
+//    LOG("%s: Done\n", __func__);
 
     xdg_surface_ack_configure(xdg_surface, serial);
 
@@ -976,8 +981,6 @@ xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t seri
         }
         pthread_mutex_unlock(&wowin->surface_lock);
     }
-
-    LOG("%s: Done 2\n", __func__);
 }
 
 static const struct xdg_surface_listener xdg_surface_listener = {
@@ -1036,7 +1039,7 @@ window_new_pq(void * v, short revents)
 static void
 window_win_resize_cb(void * v, wo_surface_t * wos, const wo_rect_t win_pos)
 {
-    LOG("%s\n", __func__);
+//    LOG("%s\n", __func__);
     (void)v;
     wo_surface_dst_pos_set(wos, win_pos);
 }
@@ -1075,8 +1078,6 @@ wo_window_new(wo_env_t * const woe, bool fullscreen, const wo_rect_t pos, const 
     // the attach which includes fullscreen if applied
     while (sem_wait(&wowin->sync_sem) == -1 && errno == EINTR)
         /* loop */;
-
-    LOG("Made win\n");
     return wowin;
 }
 

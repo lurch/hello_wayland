@@ -53,6 +53,7 @@
 static enum AVPixelFormat hw_pix_fmt;
 static FILE *output_file = NULL;
 static long frames = 0;
+static bool no_wait = false;
 
 static AVFilterContext *buffersink_ctx = NULL;
 static AVFilterContext *buffersrc_ctx = NULL;
@@ -125,7 +126,7 @@ display_wait(const AVFrame * const frame, const AVRational time_base)
 
     last_conv = pts_conv;
 
-    printf("PTS_delta=%" PRId64 ", Now_delta=%" PRId64 ", TB=%d/%d, Delta=%" PRId64 "\n", pts_delta, now_delta, time_base.num, time_base.den, delta);
+//    printf("PTS_delta=%" PRId64 ", Now_delta=%" PRId64 ", TB=%d/%d, Delta=%" PRId64 "\n", pts_delta, now_delta, time_base.num, time_base.den, delta);
 
     if (delta < 0 || delta > 6000000) {
         base_pts = pts;
@@ -191,15 +192,16 @@ static int decode_write(const AVStream * const stream,
                         fprintf(stderr, "Failed to get frame: %s", av_err2str(ret));
                     goto fail;
                 }
-                egl_wayland_out_modeset(dpo, av_buffersink_get_w(buffersink_ctx), av_buffersink_get_h(buffersink_ctx), av_buffersink_get_time_base(buffersink_ctx));
+                vidout_wayland_modeset(dpo, av_buffersink_get_w(buffersink_ctx), av_buffersink_get_h(buffersink_ctx), av_buffersink_get_time_base(buffersink_ctx));
                 time_base = av_buffersink_get_time_base(buffersink_ctx);
             }
             else {
-                egl_wayland_out_modeset(dpo, avctx->coded_width, avctx->coded_height, avctx->framerate);
+                vidout_wayland_modeset(dpo, avctx->coded_width, avctx->coded_height, avctx->framerate);
             }
 
-            display_wait(frame, time_base);
-            egl_wayland_out_display(dpo, frame);
+            if (!no_wait)
+                display_wait(frame, time_base);
+            vidout_wayland_display(dpo, frame);
 
             if (output_file != NULL) {
                 AVFrame *tmp_frame;
@@ -347,9 +349,18 @@ void usage()
             "Usage: hello_egl_wayland [-d]\n"
             "                      [-l loop_count] [-f <frames>] [-o yuv_output_file]\n"
             "                      [--deinterlace] [--pace-input <hz>] [--fullscreen]\n"
-            "                      [--no-wait]\n"
+            "                      "
+#if HAS_RUNTICKER
+            "[--ticker <text>] "
+#endif
+#if HAS_RUNCUBE
+            "[--cube] "
+#endif
+            "[--no-wait]\n"
             "                      <input file> [<input_file> ...]\n\n"
-            " -d   Use dmabuf (otherwise egl)\n"
+            " -e        Use EGL to render video (otherwise direct dmabuf)\n"
+            " --cube    Show rotating cube\n"
+            " --ticker  Show scrolling ticker with <text> repeated indefinitely\n"
             " --no-wait Decode at max speed, do not wait for display\n");
     exit(1);
 }
@@ -380,9 +391,14 @@ int main(int argc, char *argv[])
     bool wants_deinterlace = false;
     long pace_input_hz = 0;
     bool try_hw = true;
-    bool use_dmabuf = false;
+    bool use_dmabuf = true;
     bool fullscreen = false;
-    bool no_wait = false;
+#if HAS_RUNCUBE
+    bool wants_cube = false;
+#endif
+#if HAS_RUNTICKER
+    const char * ticker_text = NULL;
+#endif
 
     {
         char * const * a = argv + 1;
@@ -428,8 +444,8 @@ int main(int argc, char *argv[])
                 --n;
                 ++a;
             }
-            else if (strcmp(arg, "-d") == 0) {
-                use_dmabuf = true;
+            else if (strcmp(arg, "-e") == 0) {
+                use_dmabuf = false;
             } else if (strcmp(arg, "--pace-input") == 0) {
                 if (n == 0)
                     usage();
@@ -442,6 +458,20 @@ int main(int argc, char *argv[])
             else if (strcmp(arg, "--deinterlace") == 0) {
                 wants_deinterlace = true;
             }
+#if HAS_RUNCUBE
+            else if (strcmp(arg, "--cube") == 0) {
+                wants_cube = true;
+            }
+#endif
+#if HAS_RUNTICKER
+            else if (strcmp(arg, "--ticker") == 0) {
+                if (n == 0)
+                    usage();
+                ticker_text = *a;
+                --n;
+                ++a;
+            }
+#endif
             else if (strcmp(arg, "--no-wait") == 0) {
                 no_wait = true;
             }
@@ -476,7 +506,7 @@ int main(int argc, char *argv[])
         unsigned int flags =
             (fullscreen ? WOUT_FLAG_FULLSCREEN : 0) |
             (no_wait ? WOUT_FLAG_NO_WAIT : 0);
-        dpo = use_dmabuf ? dmabuf_wayland_out_new(flags) : egl_wayland_out_new(flags);
+        dpo = use_dmabuf ? dmabuf_wayland_out_new(flags) : vidout_wayland_new(flags);
         if (dpo == NULL) {
             fprintf(stderr, "Failed to open egl_wayland output\n");
             return 1;
@@ -492,10 +522,12 @@ int main(int argc, char *argv[])
     }
 
 #if HAS_RUNTICKER
-    egl_wayland_out_runticker(dpo);
+    if (ticker_text != NULL && *ticker_text != '\0')
+        vidout_wayland_runticker(dpo, ticker_text);
 #endif
 #if HAS_RUNCUBE
-    egl_wayland_out_runcube(dpo);
+    if (wants_cube)
+        vidout_wayland_runcube(dpo);
 #endif
 
 loopy:
@@ -573,7 +605,7 @@ retry_hw:
         decoder_ctx->thread_count = 3;
     }
     else {
-        decoder_ctx->get_buffer2 = egl_wayland_out_get_buffer2;
+        decoder_ctx->get_buffer2 = vidout_wayland_get_buffer2;
         decoder_ctx->opaque = dpo;
         decoder_ctx->thread_count = 0; // FFmpeg will pick a default
     }
@@ -662,6 +694,6 @@ retry_hw:
     if (--loop_count > 0)
         goto loopy;
 
-    egl_wayland_out_delete(dpo);
+    vidout_wayland_delete(dpo);
     return 0;
 }
